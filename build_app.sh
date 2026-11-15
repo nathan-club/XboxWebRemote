@@ -28,14 +28,18 @@ if [ -z "$ICON_SRC" ] || [ ! -s "$ICON_SRC" ]; then
   ICON_SRC="build/icon-src.png"
 fi
 mkdir -p build/AppIcon.iconset
-for sz in 16 32 64 128 256 512 1024; do
-  sips -z $sz $sz "$ICON_SRC" --out "build/AppIcon.iconset/icon_${sz}x${sz}.png" >/dev/null
-done
-# @2x 变体 (128->256 已有, 复制映射)
-cp build/AppIcon.iconset/icon_32x32.png  build/AppIcon.iconset/icon_16x16@2x.png   2>/dev/null || true
-cp build/AppIcon.iconset/icon_64x64.png  build/AppIcon.iconset/icon_32x32@2x.png   2>/dev/null || true
-cp build/AppIcon.iconset/icon_256x256.png build/AppIcon.iconset/icon_128x128@2x.png 2>/dev/null || true
-cp build/AppIcon.iconset/icon_512x512.png build/AppIcon.iconset/icon_256x256@2x.png 2>/dev/null || true
+# iconset 只接受固定命名 (16/16@2x/32/32@2x/128/128@2x/256/256@2x/512/512@2x)
+# 生成精确尺寸并按规范命名 — 多余或非法命名的文件会被 iconutil 静默丢弃 (曾因此缺 512@2x 导致聚焦/启动台空白)
+sips -z 16 16   "$ICON_SRC" --out build/AppIcon.iconset/icon_16x16.png      >/dev/null
+sips -z 32 32   "$ICON_SRC" --out build/AppIcon.iconset/icon_16x16@2x.png   >/dev/null
+sips -z 32 32   "$ICON_SRC" --out build/AppIcon.iconset/icon_32x32.png      >/dev/null
+sips -z 64 64   "$ICON_SRC" --out build/AppIcon.iconset/icon_32x32@2x.png   >/dev/null
+sips -z 128 128 "$ICON_SRC" --out build/AppIcon.iconset/icon_128x128.png    >/dev/null
+sips -z 256 256 "$ICON_SRC" --out build/AppIcon.iconset/icon_128x128@2x.png >/dev/null
+sips -z 256 256 "$ICON_SRC" --out build/AppIcon.iconset/icon_256x256.png    >/dev/null
+sips -z 512 512 "$ICON_SRC" --out build/AppIcon.iconset/icon_256x256@2x.png >/dev/null
+sips -z 512 512 "$ICON_SRC" --out build/AppIcon.iconset/icon_512x512.png    >/dev/null
+sips -z 1024 1024 "$ICON_SRC" --out build/AppIcon.iconset/icon_512x512@2x.png >/dev/null
 iconutil -c icns build/AppIcon.iconset -o "$CONTENTS/Resources/AppIcon.icns"
 
 echo "==> 拷贝资源"
