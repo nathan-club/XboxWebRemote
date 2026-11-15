@@ -17,8 +17,10 @@ swiftc -O -o "$CONTENTS/MacOS/XboxWebRemote" app-src/launcher.swift
 
 echo "==> 生成图标 (Xbox 绿色标志 → icns)"
 ICON_SRC=""
-if qlmanage -t -s 1024 -o build www/assets/xbox-green.svg >/dev/null 2>&1; then
-  ICON_SRC="build/xbox-green.svg.png"
+# qlmanage 遵守 svg 的 width/height 属性 (16px), 必须先放大到 1024 再渲染
+sed -e 's/width="16" height="16"/width="1024" height="1024"/' www/assets/xbox-green.svg > build/xbox-1024.svg 2>/dev/null
+if qlmanage -t -s 1024 -o build build/xbox-1024.svg >/dev/null 2>&1; then
+  ICON_SRC="build/xbox-1024.svg.png"
 fi
 if [ -z "$ICON_SRC" ] || [ ! -s "$ICON_SRC" ]; then
   # 回退: 用主机产品图

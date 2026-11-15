@@ -58,7 +58,22 @@ final class Delegate: NSObject, NSApplicationDelegate {
         }
         logLine("服务已停止 (App 退出)")
     }
+
+    // 再次点击 Dock 图标: 打开/聚焦浏览器页面
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if portOpen(8977) { openBrowser() }
+        return true
+    }
 }
+
+// 基本菜单栏 (保证 Cmd+Q 可用)
+let mainMenu = NSMenu()
+let appMenuItem = NSMenuItem()
+mainMenu.addItem(appMenuItem)
+let appMenu = NSMenu()
+appMenu.addItem(NSMenuItem(title: "退出 Xbox网页串流", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+appMenuItem.submenu = appMenu
+app.mainMenu = mainMenu
 
 let app = NSApplication.shared
 let delegate = Delegate()
