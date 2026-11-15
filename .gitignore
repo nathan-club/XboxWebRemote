@@ -11,3 +11,4 @@ handler.log
 # 45MB 静态 ffmpeg 不入库, 见 README「ffmpeg 下载」
 bin/ffmpeg
 bin/
+build/

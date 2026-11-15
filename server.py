@@ -51,7 +51,10 @@ except ImportError:
 IS_WINDOWS = os.name == 'nt'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WWW_DIR = os.path.join(BASE_DIR, 'www')
-TOKEN_FILE = os.path.join(BASE_DIR, 'tokens.json')
+# 数据目录: 默认与脚本同目录; 打包为 .app 时由启动器设 XWR_DATA_DIR 指向
+# ~/Library/Application Support/XboxWebRemote/ (Resources 只读)
+DATA_DIR = os.environ.get('XWR_DATA_DIR') or BASE_DIR
+TOKEN_FILE = os.path.join(DATA_DIR, 'tokens.json')
 PORT = 8977
 TMP_DIR = os.path.join(tempfile.gettempdir(), 'xwr-hls')
 FFMPEG_LOG = os.path.join(tempfile.gettempdir(), 'xwr-ffmpeg.log')
@@ -69,7 +72,7 @@ USER_AGENT = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
               'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36')
 
 _print_lock = threading.Lock()
-_token_lock = threading.Lock()
+_token_lock = threading.RLock()  # 可重入: 刷新链在持锁路径内再取令牌
 
 # 令牌缓存 (内存镜像, 落盘到 tokens.json)
 _state = {
@@ -116,7 +119,7 @@ def http_json(method, host, path, headers, body=None, form=None, want_headers=Fa
 def save_tokens():
     """原子写 (临时文件+rename), 避免多线程并发保存写坏 tokens.json。"""
     tmp = {k: v for k, v in _state.items() if v}
-    fd, tmpfile = tempfile.mkstemp(dir=BASE_DIR, prefix='.tokens-', suffix='.tmp')
+    fd, tmpfile = tempfile.mkstemp(dir=DATA_DIR, prefix='.tokens-', suffix='.tmp')
     try:
         with os.fdopen(fd, 'w') as f:
             json.dump(tmp, f, ensure_ascii=False, indent=2)
@@ -383,28 +386,7 @@ def xal_complete_login(url_or_code):
         'expires_at': time.time() + int(data.get('expires_in', 3600)),
     }
 
-    payload = {
-        'AccessToken': 't=' + data['access_token'],
-        'AppId': XAL_APP['AppId'],
-        'DeviceToken': flow['device_token'],
-        'Sandbox': 'RETAIL',
-        'SiteName': 'user.auth.xboxlive.com',
-        'UseModernGamertag': True,
-        'ProofKey': xal_proof_key(),
-        'SessionId': flow['session_id'],
-    }
-    body = json.dumps(payload)
-    status, sdata = http_json('POST', 'sisu.xboxlive.com', '/authorize', {
-        'Content-Type': 'application/json',
-        'x-xbl-contract-version': '1',
-        'Cache-Control': 'no-store, must-revalidate, no-cache',
-        'Signature': xal_sign('/authorize', '', body),
-    }, body=body.encode())
-    if status != 200 or not isinstance(sdata, dict) or 'UserToken' not in sdata:
-        _state['xaluser'] = None
-        save_tokens()
-        raise RuntimeError('SISU 授权失败: %s' % json.dumps(sdata)[:300])
-    _state['sisu'] = sdata
+    _sisu_authorize(data['access_token'], flow['device_token'], flow['session_id'])
     _state['xhome'] = None
     _state['webxsts'] = None
     save_tokens()
@@ -415,12 +397,71 @@ def xal_complete_login(url_or_code):
         log('预取 xHome 令牌失败(稍后再试): %s', e)
 
 
+def _sisu_authorize(access_token, device_token, session_id=None):
+    """用 v1 access_token 重新执行 sisu /authorize, 刷新 UserToken (XSTS 的原料)。
+    UserToken 过期 (XErr 2148916258) 时由 xal_xsts 自动调用。"""
+    payload = {
+        'AccessToken': 't=' + access_token,
+        'AppId': XAL_APP['AppId'],
+        'DeviceToken': device_token,
+        'Sandbox': 'RETAIL',
+        'SiteName': 'user.auth.xboxlive.com',
+        'UseModernGamertag': True,
+        'ProofKey': xal_proof_key(),
+    }
+    if session_id:
+        payload['SessionId'] = session_id
+    body = json.dumps(payload)
+    status, sdata = http_json('POST', 'sisu.xboxlive.com', '/authorize', {
+        'Content-Type': 'application/json',
+        'x-xbl-contract-version': '1',
+        'Cache-Control': 'no-store, must-revalidate, no-cache',
+        'Signature': xal_sign('/authorize', '', body),
+    }, body=body.encode())
+    if status != 200 or not isinstance(sdata, dict) or 'UserToken' not in sdata:
+        raise RuntimeError('SISU 授权失败: %s' % json.dumps(sdata)[:300])
+    _state['sisu'] = sdata
+    _state['webxsts'] = None
+    save_tokens()
+    log('SISU UserToken 已刷新')
+
+
+def _sisu_usertoken_stale():
+    """sisu UserToken 缺失或临期 (60s 内过期) — XSTS 前主动刷新。"""
+    sisu = _state.get('sisu')
+    if not sisu:
+        return True
+    na = (sisu.get('UserToken') or {}).get('NotAfter')
+    if not na:
+        return False  # 响应没给过期时间, 交给失败重试兜底
+    try:
+        # Xbox 时间格式: 2026-10-30T19:30:00.1234567Z (7 位小数 + Z)
+        t = na.replace('Z', '')
+        if '.' in t:
+            t = t.split('.')[0]
+        return time.mktime(time.strptime(t, '%Y-%m-%dT%H:%M:%S')) - 60 < time.time()
+    except Exception:
+        return False
+
+
+def _refresh_sisu_user_token():
+    """刷新 sisu UserToken: v1 令牌 → 重新 sisu /authorize (设备令牌复用缓存)。"""
+    xal_user_access()
+    dev = (_state.get('xaldevice') or {}).get('token')
+    _sisu_authorize(_state['xaluser']['access_token'], dev, None)
+
+
 def xal_xsts(relying_party, force=False):
     """基于 sisu 令牌的 XSTS (带 ProofOfPossession 签名)。
     注: 只传 UserTokens 即可 (XStreaming 同款); 我们的 sisu 响应里没有顶层 DeviceToken。"""
     sisu = _state.get('sisu')
     if not sisu:
         raise RuntimeError('未完成 XAL 登录')
+    # UserToken 临期: 先刷新 sisu 再签名 (XErr 2148916258 = 令牌过期)
+    if force or _sisu_usertoken_stale():
+        log('SISU UserToken 临期/强制刷新, 自动续签...')
+        _refresh_sisu_user_token()
+        sisu = _state.get('sisu')
     payload = {
         'Properties': {
             'SandboxId': 'RETAIL',
@@ -437,6 +478,21 @@ def xal_xsts(relying_party, force=False):
         'Signature': xal_sign('/xsts/authorize', '', body),
     }, body=body.encode())
     if status != 200 or 'Token' not in data:
+        xerr = (data.get('XErr') if isinstance(data, dict) else None)
+        if xerr in (2148916238, 2148916258) and not force:
+            # 兜底: 明确的令牌过期错误 → 刷新 sisu 后重试一次
+            log('XSTS 报令牌过期 (XErr %s), 刷新 sisu 后重试...' % xerr)
+            _refresh_sisu_user_token()
+            payload['Properties']['UserTokens'] = [_state['sisu']['UserToken']['Token']]
+            body = json.dumps(payload)
+            status, data = http_json('POST', 'xsts.auth.xboxlive.com', '/xsts/authorize', {
+                'Content-Type': 'application/json',
+                'x-xbl-contract-version': '1',
+                'Cache-Control': 'no-store, must-revalidate, no-cache',
+                'Signature': xal_sign('/xsts/authorize', '', body),
+            }, body=body.encode())
+            if status == 200 and 'Token' in data:
+                return data
         raise RuntimeError('XSTS(%s) 失败: %s' % (relying_party, json.dumps(data)[:300]))
     return data
 

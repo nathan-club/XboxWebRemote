@@ -20,9 +20,19 @@
 
 ## 快速开始（macOS）
 
-1. 双击 **双击启动.command**（启动本地服务 + 打开浏览器 `http://127.0.0.1:8977`）
-2. 首次点「登录微软账号」，按提示登录；登录后浏览器弹出「打开 Xbox网页串流？」时点**打开**（由仓库内的 `XboxLoginHelper.app` 自动完成回调）
-3. 主机列表里点「开始串流」，开玩
+**方式一：macOS App（推荐）** — 仓库自带 `build_app.sh`，运行后安装到 `/Applications/Xbox网页串流.app`：
+
+```bash
+./build_app.sh    # 构建并安装; 登录令牌自动迁移到 ~/Library/Application Support/XboxWebRemote/
+```
+
+- Dock 有图标、点开即启动服务并打开浏览器，**退出 App 即停止服务**
+- 登录回调协议自动注册；日志在 `~/Library/Logs/XboxWebRemote.log`
+- 源码在 `app-src/launcher.swift`（Swift 启动器管理服务子进程生命周期）
+
+**方式二：脚本运行** — 双击 `双击启动.command`（终端窗口模式，令牌存脚本目录）。
+
+两者流程一致：首次点「登录微软账号」→ 登录后浏览器弹出「打开 Xbox网页串流？」点**打开**（`XboxLoginHelper.app` 自动完成回调）→ 主机列表点「开始串流」。
 
 ## 快速开始（Windows）
 
@@ -59,14 +69,17 @@ macOS 一行命令：`mkdir -p bin && curl -L -o bin/ffmpeg https://github.com/e
 ## 目录结构
 
 ```
-双击启动.command        macOS 启动器
+双击启动.command        macOS 脚本启动器 (终端模式)
 启动串流-windows.bat    Windows 启动器 (自动装依赖 + 注册协议)
-server.py              本地服务: 静态托管 + XAL 登录 + 网关代理 + 电源 + 直播源
-www/index.html         网页 App (串流/主机列表/画质/统计/直播模式/直播源)
-www/live.html          直播模式独立窗口
-www/assets/            Xbox 标志与主机产品图 (来自 XStreaming)
-XboxLoginHelper.app    macOS 的 ms-xal:// 协议回调助手 (Swift, 源码在 helper-src/)
-helper-src/            助手源码与构建说明
+build_app.sh            macOS .app 构建脚本 (产物安装到 /Applications)
+app-src/launcher.swift  .app 启动器源码 (服务子进程生命周期管理)
+server.py               本地服务: 静态托管 + XAL 登录 + 网关代理 + 电源 + 直播源
+www/index.html          网页 App (串流/主机列表/画质/统计/直播模式/直播源)
+www/live.html           直播模式独立窗口
+www/assets/             Xbox 标志与主机产品图 (来自 XStreaming)
+XboxLoginHelper.app     macOS 的 ms-xal:// 协议回调助手 (Swift, 源码在 helper-src/)
+helper-src/             助手源码与构建说明
+docs/HANDOFF.md         交接文档: 协议速查/踩坑史/验证状态/发布流程
 ```
 
 ## 致谢 / Credits
