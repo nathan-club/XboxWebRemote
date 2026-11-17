@@ -116,3 +116,50 @@ test('malformed nonempty JSON remains an error without disclosing the response',
     return true;
   });
 });
+
+test('connected media cancels readiness timeout while keepalive and session remain usable', async t => {
+  const requests=[];
+  const {client,attach}=setup(t,async(url,opts)=>{
+    requests.push(opts.method+' '+url.split('/').pop());
+    if(url.endsWith('/play')) return reply({sessionId:'synthetic',sessionPath:'v5/sessions/home/synthetic'},202);
+    if(url.endsWith('/state')) return reply({state:'Provisioned'});
+    return new Response(null,{status:202});
+  });
+  const session=attach(await client.startStream('home','synthetic-console'));
+  const errors=[];
+  session.onSignallingError=e=>errors.push(e);
+  const pending=session.waitForState('ReadyToConnect');
+  session.cancelStateWait();
+  await pending;
+  await new Promise(resolve=>setTimeout(resolve,25));
+  await session.sendMSALAuth('synthetic-token');
+  await session.sendKeepalive();
+  assert.deepEqual(errors,[]);
+  assert.equal(requests.some(r=>r.startsWith('DELETE')),false);
+  assert.equal(requests.filter(r=>r==='GET state').length,1);
+  assert.ok(requests.includes('POST connect'));
+  assert.ok(requests.includes('POST keepalive'));
+});
+
+test('cancelled or superseded state requests cannot report late errors',async t=>{
+  const {attach}=setup(t,async()=>reply({}));
+  let rejectState;
+  const session=attach({getSessionPath:()=>'/session',stop:async()=>{},
+    refreshState:()=>new Promise((resolve,reject)=>{rejectState=reject;})});
+  const errors=[];
+  session.onSignallingError=e=>errors.push(e);
+  const pending=session.waitForState('ReadyToConnect');
+  session.cancelStateWait();
+  rejectState(new Error('late failure'));
+  await pending;
+  assert.deepEqual(errors,[]);
+});
+
+test('a session that never becomes ready or connects still reports timeout',async t=>{
+  const {attach}=setup(t,async()=>reply({}));
+  const session=attach({getSessionPath:()=>'/session',stop:async()=>{},refreshState:async()=>'Provisioned'});
+  const errors=[];
+  session.onSignallingError=e=>errors.push(e.message);
+  await session.waitForState('ReadyToConnect');
+  assert.deepEqual(errors,['等待主机状态超时']);
+});

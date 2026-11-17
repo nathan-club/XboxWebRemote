@@ -626,7 +626,8 @@ async function startStream(serverId, name, isRetry, wasOff){
       '<button class="btn ghost small" style="margin-top:10px" onclick="backToConsoles()">返回</button>', true);
     return;
   }
-  stream = prepareSession(resp);
+  const session = prepareSession(resp);
+  stream = session;
   stage('正在准备会话…', '等待主机分配串流会话（若主机在待机/唤醒中，可能需要 1–2 分钟）');
 
   // 会话长时间不就绪则报错并清理, 避免卡死 (待机唤醒要给足时间)
@@ -637,36 +638,49 @@ async function startStream(serverId, name, isRetry, wasOff){
     try{ stream && stream.stop(); }catch(e){}
   }, 300000);
 
-  stream.onProvisioned = () => {
+  let provisioned = false, failed = false;
+  session.onProvisioned = () => {
+    if(stream !== session || provisioned || failed) return;
+    provisioned = true;
     clearTimeout(provTimer);
     stage('会话已就绪', '正在交换 SDP 连接描述…');
     provTimer = setTimeout(()=>{
+      if(stream !== session) return;
       stage('媒体连接超时', '信令或媒体通道未能建立，请断开后重新连接。', true);
       clearInterval(keepaliveTimer);
-      if(stream) stream.stop().catch(e=>console.error('stop', e));
+      session.stop().catch(e=>console.error('stop', e));
     }, 90000);
-    startPlayer().catch(error=>stream && stream.onSignallingError(error));
-    // 继续观察 ReadyToConnect 并发送 lpt 主机握手令牌
-    // (缺失它主机会在 ~5 分钟后主动断开; waitForState('Provisioned') 达成后库会停轮询, 需续看)
-    let msalSent = false;
-    const sendMsal = async () => {
-      if(msalSent || !stream) return; msalSent = true;
-      try{
-        const r = await fetch('/api/msal'); const d = await r.json();
+
+    // Media can become connected while the gateway still reports Provisioned.
+    // Complete host authorization once, from either readiness signal.
+    let msalRequest = null;
+    const sendMsal = () => {
+      if(msalRequest) return msalRequest;
+      msalRequest = (async () => {
+        const r = await fetch('/api/msal');
+        if(!r.ok) throw new Error('读取主机授权失败：HTTP '+r.status);
+        const d = await r.json();
         if(!d.token) throw new Error(d.error||'无令牌');
-        await stream.sendMSALAuth(d.token);
+        if(stream !== session) return;
+        await session.sendMSALAuth(d.token);
         console.log('[auth] 主机握手令牌(lpt)已发送');
-      }catch(e){ console.error('[auth] lpt 发送失败, 将重试', e); msalSent = false; }
+      })();
+      return msalRequest;
     };
-    stream.onReadyToConnect = ()=>sendMsal();
-    stream.waitForState('ReadyToConnect');
-    // 兜底: 已连接但迟迟没等到 ReadyToConnect 时也发
-    setTimeout(()=>{ if(player && player._peerConnection &&
-      player._peerConnection.connectionState==='connected') sendMsal(); }, 6000);
+    session.onReadyToConnect = () => {
+      sendMsal().catch(error=>session.onSignallingError(error));
+    };
+    session.onMediaConnected = () => {
+      session.cancelStateWait();
+      sendMsal().catch(error=>session.onSignallingError(error));
+    };
+    session.waitForState('ReadyToConnect');
+    startPlayer().catch(error=>session.onSignallingError(error));
     clearInterval(keepaliveTimer);
     keepaliveTimer = setInterval(async ()=>{
+      if(stream !== session) return;
       try{
-        const r = await stream.sendKeepalive();
+        const r = await session.sendKeepalive();
         if(r && (r.code==='SessionNotActive'||r.code==='SessionNotFound')){
           clearInterval(keepaliveTimer);
           toast('会话已结束');
@@ -675,17 +689,21 @@ async function startStream(serverId, name, isRetry, wasOff){
       }catch(e){ /* 网络抖动忽略 */ }
     }, 30000);
   };
-  stream.onSignallingError = error => {
+  session.onSignallingError = error => {
+    if(stream !== session || failed) return;
+    failed = true;
+    stopStats();
     clearTimeout(provTimer);
     clearInterval(keepaliveTimer);
     stage('信令连接失败', '', true);
     $('stageSub').textContent = error.message + '。请断开后重新连接。';
-    if(stream) stream.stop().catch(e=>console.error('stop', e));
+    session.stop().catch(e=>console.error('stop', e));
   };
-  stream.waitForState('Provisioned');
+  session.waitForState('Provisioned');
 }
 
 async function startPlayer(){
+  const session = stream;
   player = new XCP.Player('streamHolder', {video_bitrate:appConfig.videoBitrate || 0});
   player._peerConnection.setConfiguration(XwrMedia.rtcConfig(mediaMode, appConfig.iceServers));
 
@@ -706,8 +724,10 @@ async function startPlayer(){
 
   setState('WebRTC 协商中 ('+curQuality().label+')','');
   player.onConnectionStateChange(s=>{
+    if(stream !== session) return;
     setState(connText(s), s==='connected'?'good':(s==='failed'?'bad':''));
     if(s==='connected'){
+      session.onMediaConnected();
       clearTimeout(provTimer);
       stageDone();
       ensureGamepad();

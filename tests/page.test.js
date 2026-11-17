@@ -91,3 +91,51 @@ test('configured relay remains the default until the user selects a mode', async
   assert.equal(vm.runInContext('mediaMode', p.context), 'direct');
   assert.match(p.nodes.get('mediaHint').textContent, /不使用 TURN/);
 });
+
+test('media readiness cancels startup polling, sends host authorization once and retains keepalive', async()=>{
+  const p=page(true);
+  const calls={cancel:0,auth:0,keepalive:0,player:0,stop:0};
+  const intervals=[];
+  const session={getSessionId:()=> 'synthetic',waitForState(){},
+    cancelStateWait(){calls.cancel++;},
+    async sendMSALAuth(token){assert.equal(token,'synthetic-token');calls.auth++;},
+    async sendKeepalive(){calls.keepalive++;return {};},
+    async stop(){calls.stop++;}};
+  p.context.xCloudPlayer.default.ApiClient=class {async startStream(){return session;}};
+  p.context.XwrSignalling={install:()=>s=>s};
+  p.context.capturePlayer=async()=>{calls.player++;};
+  p.context.setInterval=callback=>{intervals.push(callback);return intervals.length;};
+  p.context.fetch=async url=>{
+    assert.equal(url,'/api/msal');
+    return {ok:true,json:async()=>({token:'synthetic-token'})};
+  };
+  vm.runInContext('startPlayer=capturePlayer;',p.context);
+  await vm.runInContext("startStream('synthetic','console',false,false)",p.context);
+  session.onProvisioned();
+  session.onProvisioned();
+  assert.equal(calls.player,1);
+  session.onReadyToConnect();
+  session.onMediaConnected();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(calls.cancel,1);
+  assert.equal(calls.auth,1);
+  await intervals[0]();
+  assert.equal(calls.keepalive,1);
+  assert.equal(calls.stop,0);
+});
+
+test('host authorization errors are reported instead of leaving an unauthenticated stream',async()=>{
+  const p=page(true);
+  let stopped=0;
+  const session={getSessionId:()=> 'synthetic',waitForState(){},cancelStateWait(){},async stop(){stopped++;}};
+  p.context.xCloudPlayer.default.ApiClient=class {async startStream(){return session;}};
+  p.context.XwrSignalling={install:()=>s=>s};
+  p.context.fetch=async()=>({ok:false,status:503});
+  vm.runInContext('startPlayer=async()=>{};',p.context);
+  await vm.runInContext("startStream('synthetic','console',false,false)",p.context);
+  session.onProvisioned();
+  session.onMediaConnected();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(stopped,1);
+  assert.match(p.nodes.get('stageSub').textContent,/主机授权失败.*503/);
+});

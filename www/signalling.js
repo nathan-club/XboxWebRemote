@@ -59,6 +59,7 @@ const XwrSignalling = {
       };
       session.waitForSdpResponse = () => wait('sdp');
       session.waitForIceResponse = () => wait('ice');
+      session.cancelStateWait = () => { generation++; };
       session.waitForState = target => {
         const current = ++generation;
         const deadline = Date.now() + (target === 'Provisioned' ? 300000 : pollTimeout);
@@ -71,7 +72,9 @@ const XwrSignalling = {
           }
           if (!stopped && current === generation) throw new Error('等待主机状态超时');
         };
-        return poll().catch(error => { if (!stopped) session.onSignallingError(error); });
+        return poll().catch(error => {
+          if (!stopped && current === generation) session.onSignallingError(error);
+        });
       };
       session.onSignallingError = () => {};
       const stop = session.stop.bind(session);
