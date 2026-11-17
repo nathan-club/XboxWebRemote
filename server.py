@@ -66,6 +66,7 @@ PUBLIC_ORIGIN = os.environ.get('XWR_PUBLIC_ORIGIN', '').rstrip('/')
 ENABLE_LIVE = os.environ.get('XWR_ENABLE_LIVE', '0') == '1'
 TURN_URL = os.environ.get('XWR_TURN_URL', '')
 TURN_SECRET = os.environ.get('XWR_TURN_SECRET', '')
+STUN_URLS = [url.strip() for url in os.environ.get('XWR_STUN_URLS', '').split(',') if url.strip()]
 FORCE_RELAY = os.environ.get('XWR_FORCE_RELAY', '0') == '1'
 VIDEO_BITRATE = int(os.environ.get('XWR_VIDEO_BITRATE', '0'))
 TMP_DIR = os.path.join(tempfile.gettempdir(), 'xwr-hls')
@@ -985,7 +986,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         global _xal_flow
         try:
             if path == '/api/config' and method == 'GET':
-                ice_servers = []
+                ice_servers = [{'urls': STUN_URLS}] if STUN_URLS else []
                 if TURN_URL:
                     username = '%d:%s' % (int(time.time()) + 3600, secrets.token_hex(8))
                     credential = base64.b64encode(hmac.new(
@@ -1269,6 +1270,8 @@ def main():
     if PUBLIC_ORIGIN and (origin.scheme != 'https' or not origin.netloc or
                           origin.path or origin.query or origin.fragment or origin.username):
         raise ValueError('XWR_PUBLIC_ORIGIN 必须是 HTTPS origin，例如 https://xbox.example.com')
+    if any(not url.startswith(('stun:', 'stuns:')) for url in STUN_URLS):
+        raise ValueError('XWR_STUN_URLS 必须是逗号分隔的 stun: 或 stuns: 地址')
     if bool(TURN_URL) != bool(TURN_SECRET):
         raise ValueError('XWR_TURN_URL 和 XWR_TURN_SECRET 必须同时设置')
     if TURN_URL and not TURN_URL.startswith(('turn:', 'turns:')):

@@ -38,6 +38,7 @@ function page(authenticated, config = {}) {
   vm.createContext(context);
   const root = path.join(__dirname, '..', 'www');
   vm.runInContext(fs.readFileSync(path.join(root, 'launch.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(path.join(root, 'media.js'), 'utf8'), context);
   const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
   const js = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m=>m[1]).join('\n');
   vm.runInContext(js, context);
@@ -79,4 +80,14 @@ test('low bandwidth configuration selects 720p before starting a session', async
   const p = page(true, {videoBitrate:1500});
   await vm.runInContext('boot()', p.context);
   assert.equal(vm.runInContext('quality', p.context), '720p');
+});
+
+
+test('configured relay remains the default until the user selects a mode', async () => {
+  const p = page(true, {forceRelay:true});
+  await vm.runInContext('boot()', p.context);
+  assert.equal(p.nodes.get('mediaMode').value, 'relay');
+  p.nodes.get('mediaMode').onchange({target:{value:'direct'}});
+  assert.equal(vm.runInContext('mediaMode', p.context), 'direct');
+  assert.match(p.nodes.get('mediaHint').textContent, /不使用 TURN/);
 });

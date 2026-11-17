@@ -160,6 +160,15 @@
     <button class="btn ghost small" id="btnRefresh">刷新</button>
     <button class="btn ghost small" id="btnLogout">退出登录</button>
   </div>
+  <div style="padding:12px 20px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+    <label for="mediaMode">连接方式</label>
+    <select id="mediaMode" style="padding:8px;background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:8px">
+      <option value="auto">自动（直连或中继）</option>
+      <option value="direct">仅直连</option>
+      <option value="relay">强制中继</option>
+    </select>
+    <span id="mediaHint" style="color:var(--dim);font-size:13px"></span>
+  </div>
   <div class="console-grid" id="consoleGrid"></div>
 </section>
 
@@ -216,6 +225,7 @@
 <script src="lib/xCloudPlayer.min.js"></script>
 <script src="launch.js"></script>
 <script src="signalling.js"></script>
+<script src="media.js"></script>
 <script>
 'use strict';
 /* webpack 打包产物挂在 .default 下 */
@@ -234,6 +244,7 @@ if(!QUALITIES.some(q=>q.id===quality)) quality = '1080p';
 const curQuality = ()=>QUALITIES.find(q=>q.id===quality);
 const launcher = new XwrLaunch(window.location.href);
 let appConfig = {remoteLogin:false, liveEnabled:false};
+let mediaMode = 'auto';
 
 function deviceInfoFor(q){
   return JSON.stringify({
@@ -302,6 +313,9 @@ async function boot(){
     const configResponse = await fetch('/api/config');
     if(!configResponse.ok) throw new Error('服务访问失败：HTTP '+configResponse.status);
     appConfig = await configResponse.json();
+    mediaMode = XwrMedia.mode(window.location.href, localStorage.getItem('xwr_media_mode'), appConfig);
+    $('mediaMode').value = mediaMode;
+    updateMediaHint();
     if(appConfig.videoBitrate && appConfig.videoBitrate <= 2000) quality = '720p';
     if(appConfig.remoteLogin){
       $('loginSteps').innerHTML = '1. 首次授权前，下载并注册下方 Windows 登录助手。<br>'+
@@ -321,6 +335,19 @@ async function boot(){
     if(d.authenticated) await enterConsoles(); else showView('view-login');
   }catch(e){ showView('view-login'); msg($('loginMsg'), e.message); }
 }
+
+function updateMediaHint(){
+  $('mediaHint').textContent = {
+    auto:'自动选择可用媒体通道；网页服务不需要转发视频。',
+    direct:'不使用 TURN 中继，需要浏览器与主机能够直接互通。',
+    relay:'媒体经过已配置的 TURN 服务。',
+  }[mediaMode];
+}
+$('mediaMode').onchange = event => {
+  mediaMode = event.target.value;
+  localStorage.setItem('xwr_media_mode', mediaMode);
+  updateMediaHint();
+};
 
 $('btnLogin').onclick = async () => {
   clearMsg($('loginMsg'));
@@ -452,7 +479,9 @@ function renderConsoles(){
     direct.textContent = '复制直达链接';
     direct.onclick = async ()=>{
       try{
-        await navigator.clipboard.writeText(XwrLaunch.link(window.location.href, c.serverId));
+        const link = new URL(XwrLaunch.link(window.location.href, c.serverId));
+        link.searchParams.set('mode', mediaMode);
+        await navigator.clipboard.writeText(link.href);
         toast('已复制，收藏此链接即可直接发起串流');
       }catch(e){ toast('复制失败：'+e.message, 5000); }
     };
@@ -505,6 +534,13 @@ async function powerCommand(c, action, btn){
 function powerText(s){ return {On:'已开机', Off:'已关机', Standby:'待机', ConnectedStandby:'待机'}[s]||s; }
 
 async function startFlow(c){
+  try {
+    // A page may stay open past the TURN credential lifetime.
+    const response = await fetch('/api/config');
+    if(!response.ok) throw new Error('读取连接配置失败：HTTP '+response.status);
+    appConfig = await response.json();
+    XwrMedia.rtcConfig(mediaMode, appConfig.iceServers);
+  } catch(error) { toast(error.message, 5000); return; }
   showView('view-stream');
   const off = c.powerState === 'Off';
   if(c.powerState !== 'On'){
@@ -609,7 +645,7 @@ async function startStream(serverId, name, isRetry, wasOff){
       clearInterval(keepaliveTimer);
       if(stream) stream.stop().catch(e=>console.error('stop', e));
     }, 90000);
-    startPlayer();
+    startPlayer().catch(error=>stream && stream.onSignallingError(error));
     // 继续观察 ReadyToConnect 并发送 lpt 主机握手令牌
     // (缺失它主机会在 ~5 分钟后主动断开; waitForState('Provisioned') 达成后库会停轮询, 需续看)
     let msalSent = false;
@@ -651,11 +687,7 @@ async function startStream(serverId, name, isRetry, wasOff){
 
 async function startPlayer(){
   player = new XCP.Player('streamHolder', {video_bitrate:appConfig.videoBitrate || 0});
-  if(appConfig.iceServers && appConfig.iceServers.length){
-    player._peerConnection.setConfiguration({iceServers:appConfig.iceServers,
-      iceTransportPolicy:appConfig.forceRelay ? 'relay' : 'all'});
-  }
-
+  player._peerConnection.setConfiguration(XwrMedia.rtcConfig(mediaMode, appConfig.iceServers));
 
   // 追加按所选画质的分辨率申报 (库写死 1080p; 后发的会覆盖, 主机以最后一条为准)
   const DIMS = {'720p':[1280,720], '1080p':[1920,1080], '1440p':[2560,1440]};
@@ -684,7 +716,9 @@ async function startPlayer(){
         player.getAudioElement().play().catch(()=>{});
       }
     }
-    if(s==='failed'){ stage('连接失败','与主机的媒体通道建立失败。请检查本机与主机是否在同一网络，或查看统计面板。' +
+    if(s==='failed'){ clearTimeout(provTimer); clearInterval(keepaliveTimer);
+      if(stream) stream.stop().catch(error=>console.error('stop', error));
+      stage('连接失败', (mediaMode === 'direct' ? '直连未成功，请确认网络可达条件，或返回选择自动/中继。' : '媒体通道未建立，请查看连接统计或返回切换连接方式。') +
       '<br><button class="btn ghost small" style="margin-top:10px" onclick="backToConsoles()">返回</button>', true); stopStats(); }
   });
   player.setChatSdpHandler(offer=>{
@@ -697,7 +731,8 @@ async function startPlayer(){
 
   try{
     const offer = await player.createOffer();
-    const candidatesReady = gatherIce(pc);
+    const candidatesReady = XwrMedia.gather(pc, player.getIceCandidates());
+    candidatesReady.catch(()=>{}); // May reject while the SDP request is still in flight.
     const sdpResp = await stream.sendSDPOffer(offer);
     player.setRemoteOffer(JSON.parse(sdpResp.exchangeResponse).sdp);
 
@@ -724,41 +759,15 @@ function connText(s){
     failed:'连接失败', closed:'已关闭'}[s]||s;
 }
 
-function gatherIce(pc, timeoutMs=6000){
-  return new Promise(resolve=>{
-    const got=[];
-    let settled=false;
-    const finish=()=>{
-      if(settled) return; settled=true;
-      clearTimeout(timer);
-      pc.removeEventListener('icecandidate', onCand);
-      pc.removeEventListener('icegatheringstatechange', onState);
-      resolve(got);
-    };
-    const onCand=e=>{ if(e.candidate) got.push(e.candidate); };
-    const onState=()=>{ if(pc.iceGatheringState==='complete') finish(); };
-    const timer=setTimeout(finish, timeoutMs);
-    pc.addEventListener('icecandidate', onCand);
-    pc.addEventListener('icegatheringstatechange', onState);
-    if(pc.iceGatheringState==='complete') finish();
-  });
-}
-
 function ensureGamepad(){
-  if(!player || gamepadAttached) return;
-  // 必须等 control 数据通道真正 open 再 attach, 否则 gamepadChanged 消息会被库静默丢弃,
-  // 主机端就永远不会创建虚拟手柄
-  const dc = player._channels && player._channels.control && player._channels.control._dataChannel;
-  if(dc && dc.readyState === 'open'){
-    gamepadAttached = true;
-    try{
-      window.__gp0 = new XCP.Gamepad(0, {enable_keyboard:true, enable_vibration:true});
-      window.__gp0.attach(player);
-      toast('🎮 手柄已挂载，可按手柄任意键激活');
-    }catch(e){ console.error('gamepad', e); }
-    return;
+  if(!XwrMedia.inputReady(player)) return;
+  if(!window.__gp0) window.__gp0 = new XCP.Gamepad(0, {enable_keyboard:true, enable_vibration:true});
+  try{
+    gamepadAttached = XwrMedia.ensureGamepad(player, window.__gp0);
+  }catch(e){
+    gamepadAttached = false;
+    console.error('gamepad', e);
   }
-  setTimeout(ensureGamepad, 500);
 }
 
 /* 手柄状态指示: Chrome 识别 / 通道 / 焦点 */
@@ -766,15 +775,18 @@ function updateGpPill(){
   const pill = $('gpPill');
   if(!player){ pill.style.display='none'; return; }
   const pads = [...(navigator.getGamepads()||[])].filter(g=>g);
-  const dc = player._channels && player._channels.control && player._channels.control._dataChannel;
-  const chOpen = !!(dc && dc.readyState==='open');
+  const chOpen = XwrMedia.inputReady(player) && gamepadAttached;
   const pid = (window.__gp0 && window.__gp0.getPhysicalGamepadId) ? window.__gp0.getPhysicalGamepadId() : -1;
   let txt, ok=true;
   if(!document.hasFocus()){ txt='⚠️ 点击页面激活输入'; ok=false; }
   else if(pads.length===0){ txt='⚠️ 手柄未识别·按手柄任意键'; ok=false; }
   else if(pid<0){ txt='⚠️ 手柄已识别·再按一次按键'; ok=false; }
   else if(!chOpen){ txt='⚠️ 手柄通道建立中…'; ok=false; }
-  else { txt='🎮 '+(pads[0].id||'controller').split('(')[0].trim().slice(0,24); }
+  else {
+    const pad = pads.find(p=>p.index===pid);
+    const active = pad && (pad.buttons.some(b=>b.pressed || b.value>0.1) || pad.axes.some(a=>Math.abs(a)>0.2));
+    txt='🎮 '+(active ? '输入中 · ' : '已就绪 · ')+(pad && pad.id||'controller').split('(')[0].trim().slice(0,24);
+  }
   pill.style.display='flex';
   pill.textContent = txt;
   pill.style.color = ok ? 'var(--accent)' : 'var(--warn)';
@@ -791,7 +803,7 @@ window.backToConsoles = async ()=>{
   try{ window.__gp0 && window.__gp0.detach(); }catch(e){}
   try{ player && player.destroy(); }catch(e){}
   try{ stream && stream.stop && stream.stop(); }catch(e){}
-  player=null; stream=null; gamepadAttached=false;
+  player=null; stream=null; gamepadAttached=false; window.__gp0=null;
   showView('view-consoles');
   refreshConsoles();
 };
@@ -1052,6 +1064,7 @@ function classify(local, remote){
 
 async function startStats(){
   stopStats();
+  lastBytes=0; lastTs=0;
   statsTimer = setInterval(pollStats, 1000);
   pollStats();
 }
@@ -1059,6 +1072,7 @@ function stopStats(){ clearInterval(statsTimer); statsTimer=null; }
 
 async function pollStats(){
   const panel=$('statsPanel'), pill=$('netPill');
+  ensureGamepad();
   updateGpPill();
   if(!player||!player._peerConnection){ return; }
   let stats;
@@ -1071,6 +1085,9 @@ async function pollStats(){
       (r.nominated || (r.packetsReceived||0)>0)){
       if(!pair || ((r.packetsReceived||0)>(pair.packetsReceived||0))) pair=r;
     }
+  });
+  stats.forEach(r=>{
+    if(r.type==='transport' && byId[r.selectedCandidatePairId]) pair=byId[r.selectedCandidatePairId];
   });
   let rows=[], verdict=['等待连接…',''], rtt=null;
   let local=null, remote=null;
@@ -1094,12 +1111,20 @@ async function pollStats(){
     lastBytes=v.bytesReceived; lastTs=now;
     rows.push(['分辨率', (v.frameWidth||'?')+'×'+(v.frameHeight||'?')+' @ '+(Math.round(v.framesPerSecond||0))+'fps']);
     rows.push(['视频码率', kbps]);
-    rows.push(['丢包', (v.packetsLost||0)+' / '+v.packetsReceived]);
+    rows.push(['累计 RTP 丢包', (v.packetsLost||0)+' / '+v.packetsReceived]);
+    if(v.framesDropped!==undefined) rows.push(['累计丢帧', v.framesDropped+' / '+(v.framesDecoded||0)+' 已解码']);
+    if(v.freezeCount!==undefined) rows.push(['累计画面冻结', v.freezeCount+' 次 / '+Number(v.totalFreezesDuration||0).toFixed(1)+' s']);
+    if(v.jitterBufferEmittedCount>0) rows.push(['平均缓冲等待', Math.round(v.jitterBufferDelay/v.jitterBufferEmittedCount*1000)+' ms']);
     if(v.jitter!==undefined) rows.push(['抖动', Math.round(v.jitter*1000)+' ms']);
   }
   if(rtt!==null&&rtt!==undefined) rows.push(['RTT', Math.round(rtt*1000)+' ms']);
   if(local) rows.push(['本端', (local.address||'?')+':'+(local.port||'?')+' ('+(local.candidateType||'?')+'/'+(local.protocol||'')+')']);
   if(remote) rows.push(['主机端', (remote.address||'?')+':'+(remote.port||'?')+' ('+(remote.candidateType||'?')+'/'+(remote.protocol||'')+')']);
+  const channels=player._channels||{};
+  rows.push(['输入握手', channels.message && channels.message._handshakeCompleted ? '完成' : '等待']);
+  rows.push(['手柄注册', gamepadAttached ? '已注册' : '等待']);
+  rows.push(['输入通道', channels.input && channels.input._dataChannel ? channels.input._dataChannel.readyState : '等待']);
+  stats.forEach(r=>{if(r.type==='data-channel' && r.label==='input') rows.push(['输入通道已发送', (r.messagesSent||0)+' 条 / '+(r.bytesSent||0)+' B']);});
   if(a) rows.push(['音频', '正常 ('+a.packetsReceived+' pkts)']);
 
   panel.innerHTML =

@@ -23,7 +23,7 @@ class ServerTests(unittest.TestCase):
             TOKEN_FILE=os.path.join(self.temp.name, 'tokens.json'),
             ACCESS_USER='xbox', ACCESS_PASSWORD='test-password',
             PUBLIC_ORIGIN='https://xbox.example.com', ENABLE_LIVE=False,
-            TURN_URL='', TURN_SECRET='', FORCE_RELAY=False, VIDEO_BITRATE=0,
+            TURN_URL='', TURN_SECRET='', STUN_URLS=[], FORCE_RELAY=False, VIDEO_BITRATE=0,
             _state={key: None for key in server._state}, _xal_flow=None)
         self.patches.start()
         self.addCleanup(self.patches.stop)
@@ -62,6 +62,13 @@ class ServerTests(unittest.TestCase):
             status, _, body = self.request(port, '/api/config')
             self.assertEqual(status, 200)
             self.assertEqual(json.loads(body), {'remoteLogin': True, 'liveEnabled': False, 'iceServers': [], 'forceRelay': False, 'videoBitrate': 0})
+
+    def test_config_exposes_configured_stun_without_changing_relay_default(self):
+        with patch.multiple(server, STUN_URLS=['stun:stun.example.com:3478']):
+            with self.http_server() as port:
+                status, _, body = self.request(port, '/api/config')
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)['iceServers'], [{'urls': ['stun:stun.example.com:3478']}])
 
     def test_turn_credentials_are_short_lived_and_do_not_expose_shared_secret(self):
         import hmac
