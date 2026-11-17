@@ -19,9 +19,9 @@ function page(authenticated, config = {}) {
     URL, console,
     location:{href:'https://xbox.example.com/?console=F2', origin:'https://xbox.example.com'},
     isSecureContext:true, xCloudPlayer:{default:{}},
-    document:{getElementById:element, querySelectorAll:()=>[], addEventListener(){}},
+    document:{hasFocus:()=>true, getElementById:element, querySelectorAll:()=>[], addEventListener(){}},
     localStorage:{getItem:()=>null, setItem(){}},
-    navigator:{}, addEventListener(){}, setTimeout:()=>1, clearTimeout(){},
+    navigator:{getGamepads:()=>[]}, addEventListener(){}, setTimeout:()=>1, clearTimeout(){},
     setInterval:()=>1, clearInterval(){},
     fetch:async url => {
       requests.push(url);
@@ -138,4 +138,22 @@ test('host authorization errors are reported instead of leaving an unauthenticat
   await new Promise(resolve=>setImmediate(resolve));
   assert.equal(stopped,1);
   assert.match(p.nodes.get('stageSub').textContent,/主机授权失败.*503/);
+});
+
+
+test('failed ICE diagnostics remain available before any media connects',async()=>{
+  const p=page(true);
+  p.context.probePeer={iceConnectionState:'failed',iceGatheringState:'complete',__iceErrors:[701],
+    getStats:async()=>new Map([
+      ['transport',{id:'transport',type:'transport',dtlsState:'new'}],
+      ['pair',{id:'pair',type:'candidate-pair',state:'failed'}],
+    ])};
+  vm.runInContext('player={_peerConnection:probePeer,_channels:{}};',p.context);
+  await vm.runInContext('pollStats()',p.context);
+  const panel=p.nodes.get('statsPanel').innerHTML;
+  assert.match(panel,/ICE 状态/);
+  assert.match(panel,/failed/);
+  assert.match(panel,/DTLS 状态/);
+  assert.match(panel,/701/);
+  assert.match(panel,/0 成功 \/ 1 失败/);
 });

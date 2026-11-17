@@ -706,6 +706,12 @@ async function startPlayer(){
   const session = stream;
   player = new XCP.Player('streamHolder', {video_bitrate:appConfig.videoBitrate || 0});
   player._peerConnection.setConfiguration(XwrMedia.rtcConfig(mediaMode, appConfig.iceServers));
+  const diagnosticPc = player._peerConnection;
+  diagnosticPc.addEventListener('icecandidateerror', event=>{
+    // Keep only protocol error codes, never TURN URLs or temporary credentials.
+    diagnosticPc.__iceErrors = [...(diagnosticPc.__iceErrors||[]), event.errorCode].slice(-8);
+  });
+  startStats();
 
   // 追加按所选画质的分辨率申报 (库写死 1080p; 后发的会覆盖, 主机以最后一条为准)
   const DIMS = {'720p':[1280,720], '1080p':[1920,1080], '1440p':[2560,1440]};
@@ -731,15 +737,21 @@ async function startPlayer(){
       clearTimeout(provTimer);
       stageDone();
       ensureGamepad();
-      startStats();
       if(player.getAudioElement && player.getAudioElement()){
         player.getAudioElement().play().catch(()=>{});
       }
     }
-    if(s==='failed'){ clearTimeout(provTimer); clearInterval(keepaliveTimer);
-      if(stream) stream.stop().catch(error=>console.error('stop', error));
-      stage('连接失败', (mediaMode === 'direct' ? '直连未成功，请确认网络可达条件，或返回选择自动/中继。' : '媒体通道未建立，请查看连接统计或返回切换连接方式。') +
-      '<br><button class="btn ghost small" style="margin-top:10px" onclick="backToConsoles()">返回</button>', true); stopStats(); }
+    if(s==='failed'){
+      clearTimeout(provTimer); clearInterval(keepaliveTimer);
+      const pc = player._peerConnection;
+      const reason = pc.iceConnectionState==='failed' ? 'ICE 网络连通检查失败（UDP / TURN / 主机候选地址）'
+        : 'ICE 之后的媒体安全握手失败';
+      pollStats().finally(()=>stopStats());
+      $('statsPanel').classList.add('show');
+      session.stop().catch(error=>console.error('stop', error));
+      stage('连接失败', reason + '。连接统计已展开，请保留其中的 ICE、DTLS 和中继错误码。' +
+        '<br><button class="btn ghost small" style="margin-top:10px" onclick="backToConsoles()">返回</button>', true);
+    }
   });
   player.setChatSdpHandler(offer=>{
     stream.sendChatSDPOffer(offer).then(resp=>{
@@ -1109,7 +1121,16 @@ async function pollStats(){
   stats.forEach(r=>{
     if(r.type==='transport' && byId[r.selectedCandidatePairId]) pair=byId[r.selectedCandidatePairId];
   });
-  let rows=[], verdict=['等待连接…',''], rtt=null;
+  const pc=player._peerConnection;
+  let rows=[['连接方式', mediaMode], ['ICE 状态', pc.iceConnectionState],
+    ['候选收集', pc.iceGatheringState]], verdict=['等待连接…',''], rtt=null;
+  stats.forEach(r=>{
+    if(r.type==='transport') rows.push(['DTLS 状态', r.dtlsState||'未知']);
+  });
+  if(pc.__iceErrors && pc.__iceErrors.length) rows.push(['候选错误码', pc.__iceErrors.join(', ')]);
+  const pairs=[];
+  stats.forEach(r=>{if(r.type==='candidate-pair') pairs.push(r);});
+  if(pairs.length) rows.push(['候选检查', pairs.filter(r=>r.state==='succeeded').length+' 成功 / '+pairs.filter(r=>r.state==='failed').length+' 失败']);
   let local=null, remote=null;
   if(pair){
     local = byId[pair.localCandidateId]; remote = byId[pair.remoteCandidateId];
