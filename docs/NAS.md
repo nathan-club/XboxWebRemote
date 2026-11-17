@@ -5,14 +5,36 @@ NAS 不运行浏览器，不做桌面采集或视频二次编码。部署后需�
 
 ## 启动
 
-在 NAS 上运行（需要 Docker Compose）：
+Actions 在 `main` 推送或 `v*` 标签推送后，先执行测试，再发布 `linux/amd64` 与
+`linux/arm64` 镜像到 `ghcr.io/<仓库所有者>/<仓库名小写>`。PR 只检查，不发布。
+
+每次发布产生 `sha-<完整提交SHA>` 标签；版本标签推送还会产生同名镜像标签。
+不发布 `latest`。Actions 的发布摘要提供精确的 digest 引用，部署优先使用 digest，
+因为同名标签仍可被后续重新发布覆盖。NAS 不需要源码或本地构建环境。
+
+在 NAS 准备 `compose.yaml` 和 `.env.example`，运行（需要 Docker Compose）：
 
 ```bash
 cp .env.example .env
-# 编辑 .env，填写强随机 XWR_ACCESS_PASSWORD 和实际 HTTPS origin。
+# 编辑 .env，从 Actions 发布摘要复制 XWR_IMAGE，填写访问密码和 HTTPS origin。
 # 例如用 python3 -c 'import secrets; print(secrets.token_hex(24))' 生成密码。
-docker compose up -d --build
+docker compose pull
+docker compose up -d --no-build
 ```
+
+`XWR_IMAGE` 必须明确指定发布版本，不会自动追踪新镜像，例如：
+
+```dotenv
+XWR_IMAGE=ghcr.io/owner/repository@sha256:<发布摘要中的digest>
+```
+
+首次发布的 GHCR 包可能默认为私有。如果需要匿名拉取，在 GitHub 包设置中将其可见性设为 Public；
+否则在 NAS 本地用具有 `read:packages` 权限的账号执行 `docker login ghcr.io`。
+登录凭据只保存在 NAS，不放进 Compose、公开文档或仓库。
+发布使用 Actions 自带的 `GITHUB_TOKEN`，不需要将个人 GitHub Token 添加到仓库。
+
+更新或回滚时，把 `.env` 中 `XWR_IMAGE` 换为目标版本，再执行相同的 pull/up 命令。
+保持 Compose 项目名和数据卷不变，授权会保留；更新不需要 `down -v`。
 
 默认只发布到 NAS 本机 `127.0.0.1:8977`。反向代理在另一台内网机器时，
 将 `XWR_BIND_ADDRESS` 设置为 NAS 的具体内网 IP；用防火墙限制来源为代理机器。

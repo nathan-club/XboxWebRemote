@@ -8,7 +8,8 @@
 
 ## 此 fork：NAS 网页入口
 
-新增 Docker Compose 部署、持久授权、远程访问密码、Windows 远程授权剪贴板助手，
+Actions 测试后发布 amd64/arm64 镜像到 GHCR，NAS 通过 Compose 拉取指定 digest 或提交版本。
+支持持久授权、远程访问密码、Windows 远程授权剪贴板助手，
 以及 `?console=主机ID` 直达串流链接。授权刷新沿用原有协议实现，临时上游故障不删除授权。
 
 部署与分阶段实机验收见 **[NAS 部署说明](docs/NAS.md)**。

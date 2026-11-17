@@ -1,6 +1,6 @@
 services:
   xbox-web-remote:
-    build: .
+    image: ${XWR_IMAGE:?set XWR_IMAGE to a published SHA tag or digest in .env}
     restart: unless-stopped
     ports:
       - "${XWR_BIND_ADDRESS:-127.0.0.1}:8977:8977"
