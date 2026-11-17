@@ -23,6 +23,7 @@ class ServerTests(unittest.TestCase):
             TOKEN_FILE=os.path.join(self.temp.name, 'tokens.json'),
             ACCESS_USER='xbox', ACCESS_PASSWORD='test-password',
             PUBLIC_ORIGIN='https://xbox.example.com', ENABLE_LIVE=False,
+            TURN_URL='', TURN_SECRET='', FORCE_RELAY=False, VIDEO_BITRATE=0,
             _state={key: None for key in server._state}, _xal_flow=None)
         self.patches.start()
         self.addCleanup(self.patches.stop)
@@ -60,7 +61,25 @@ class ServerTests(unittest.TestCase):
                 self.assertEqual(body, b'')
             status, _, body = self.request(port, '/api/config')
             self.assertEqual(status, 200)
-            self.assertEqual(json.loads(body), {'remoteLogin': True, 'liveEnabled': False})
+            self.assertEqual(json.loads(body), {'remoteLogin': True, 'liveEnabled': False, 'iceServers': [], 'forceRelay': False, 'videoBitrate': 0})
+
+    def test_turn_credentials_are_short_lived_and_do_not_expose_shared_secret(self):
+        import hmac
+        import hashlib
+        with patch.multiple(server, TURN_URL='turn:relay.example.com:3478?transport=udp',
+                            TURN_SECRET='synthetic-shared-key', FORCE_RELAY=True, VIDEO_BITRATE=1500):
+            with self.http_server() as port:
+                status, _, body = self.request(port, '/api/config')
+        self.assertEqual(status, 200)
+        config = json.loads(body)
+        ice = config['iceServers'][0]
+        expires = int(ice['username'].split(':')[0])
+        self.assertLessEqual(abs(expires - time.time() - 3600), 5)
+        expected = base64.b64encode(hmac.new(b'synthetic-shared-key', ice['username'].encode(), hashlib.sha1).digest()).decode()
+        self.assertEqual(ice['credential'], expected)
+        self.assertNotIn(b'synthetic-shared-key', body)
+        self.assertTrue(config['forceRelay'])
+        self.assertEqual(config['videoBitrate'], 1500)
 
     def test_unauthorized_post_does_not_logout(self):
         server._state['xaluser'] = {'refresh_token': 'retained'}

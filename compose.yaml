@@ -8,6 +8,10 @@ services:
       XWR_ACCESS_USER: ${XWR_ACCESS_USER:-xbox}
       XWR_ACCESS_PASSWORD: ${XWR_ACCESS_PASSWORD:?set XWR_ACCESS_PASSWORD in .env}
       XWR_PUBLIC_ORIGIN: ${XWR_PUBLIC_ORIGIN:-}
+      XWR_TURN_URL: ${XWR_TURN_URL:-}
+      XWR_TURN_SECRET: ${XWR_TURN_SECRET:-}
+      XWR_FORCE_RELAY: ${XWR_FORCE_RELAY:-0}
+      XWR_VIDEO_BITRATE: ${XWR_VIDEO_BITRATE:-0}
     volumes:
       - xbox-auth:/data
     cap_drop: [ALL]

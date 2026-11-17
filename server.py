@@ -23,6 +23,7 @@ import hashlib
 import http.client
 import http.server
 import hmac
+import secrets
 import ipaddress
 import json
 import mimetypes
@@ -63,6 +64,10 @@ ACCESS_USER = os.environ.get('XWR_ACCESS_USER', 'xbox')
 ACCESS_PASSWORD = os.environ.get('XWR_ACCESS_PASSWORD', '')
 PUBLIC_ORIGIN = os.environ.get('XWR_PUBLIC_ORIGIN', '').rstrip('/')
 ENABLE_LIVE = os.environ.get('XWR_ENABLE_LIVE', '0') == '1'
+TURN_URL = os.environ.get('XWR_TURN_URL', '')
+TURN_SECRET = os.environ.get('XWR_TURN_SECRET', '')
+FORCE_RELAY = os.environ.get('XWR_FORCE_RELAY', '0') == '1'
+VIDEO_BITRATE = int(os.environ.get('XWR_VIDEO_BITRATE', '0'))
 TMP_DIR = os.path.join(tempfile.gettempdir(), 'xwr-hls')
 FFMPEG_LOG = os.path.join(tempfile.gettempdir(), 'xwr-ffmpeg.log')
 
@@ -980,8 +985,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         global _xal_flow
         try:
             if path == '/api/config' and method == 'GET':
+                ice_servers = []
+                if TURN_URL:
+                    username = '%d:%s' % (int(time.time()) + 3600, secrets.token_hex(8))
+                    credential = base64.b64encode(hmac.new(
+                        TURN_SECRET.encode(), username.encode(), hashlib.sha1).digest()).decode()
+                    ice_servers.append({'urls': TURN_URL, 'username': username, 'credential': credential})
                 return self._json({'remoteLogin': bool(ACCESS_PASSWORD),
-                                   'liveEnabled': ENABLE_LIVE})
+                                   'liveEnabled': ENABLE_LIVE, 'iceServers': ice_servers,
+                                   'forceRelay': FORCE_RELAY, 'videoBitrate': VIDEO_BITRATE})
             if path == '/api/auth/status' and method == 'GET':
                 logged = bool(_state.get('xaluser') and _state.get('sisu'))
                 detail = ''
@@ -1257,6 +1269,14 @@ def main():
     if PUBLIC_ORIGIN and (origin.scheme != 'https' or not origin.netloc or
                           origin.path or origin.query or origin.fragment or origin.username):
         raise ValueError('XWR_PUBLIC_ORIGIN 必须是 HTTPS origin，例如 https://xbox.example.com')
+    if bool(TURN_URL) != bool(TURN_SECRET):
+        raise ValueError('XWR_TURN_URL 和 XWR_TURN_SECRET 必须同时设置')
+    if TURN_URL and not TURN_URL.startswith(('turn:', 'turns:')):
+        raise ValueError('XWR_TURN_URL 必须使用 turn: 或 turns:')
+    if FORCE_RELAY and not TURN_URL:
+        raise ValueError('强制中继需要配置 TURN')
+    if not 0 <= VIDEO_BITRATE <= 100000:
+        raise ValueError('XWR_VIDEO_BITRATE 必须为 0 到 100000 kbps')
     os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
     load_tokens()
     if not os.path.isdir(WWW_DIR):

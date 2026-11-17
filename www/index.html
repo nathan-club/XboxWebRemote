@@ -302,6 +302,7 @@ async function boot(){
     const configResponse = await fetch('/api/config');
     if(!configResponse.ok) throw new Error('服务访问失败：HTTP '+configResponse.status);
     appConfig = await configResponse.json();
+  
     if(appConfig.remoteLogin){
       $('loginSteps').innerHTML = '1. 首次授权前，下载并注册下方 Windows 登录助手。<br>'+
         '2. 打开 <b><a id="xalLink" target="_blank" rel="noopener">微软登录页 ↗</a></b>，登录绑定主机的账号。<br>'+
@@ -649,7 +650,12 @@ async function startStream(serverId, name, isRetry, wasOff){
 }
 
 async function startPlayer(){
-  player = new XCP.Player('streamHolder');
+  player = new XCP.Player('streamHolder', {video_bitrate:appConfig.videoBitrate || 0});
+  if(appConfig.iceServers && appConfig.iceServers.length){
+    player._peerConnection.setConfiguration({iceServers:appConfig.iceServers,
+      iceTransportPolicy:appConfig.forceRelay ? 'relay' : 'all'});
+  }
+
 
   // 追加按所选画质的分辨率申报 (库写死 1080p; 后发的会覆盖, 主机以最后一条为准)
   const DIMS = {'720p':[1280,720], '1080p':[1920,1080], '1440p':[2560,1440]};
