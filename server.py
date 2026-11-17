@@ -15,13 +15,15 @@ Xbox 网页串流 - 本地服务器
 跨平台: macOS / Windows / Linux。
   - 签名: 优先 cryptography 库 (pip install cryptography), 否则回退 openssl 命令行
   - Windows 会自动注册 ms-xal:// 协议处理器 (登录回调), 也可 python server.py --auth-code "<url>" 手动喂码
-仅监听 127.0.0.1, 令牌保存在本目录 tokens.json (权限 600)。
+默认监听 127.0.0.1；NAS 部署见 docs/NAS.md。令牌保存到 XWR_DATA_DIR (权限 600)。
 """
 
 import base64
 import hashlib
 import http.client
 import http.server
+import hmac
+import ipaddress
 import json
 import mimetypes
 import os
@@ -55,7 +57,12 @@ WWW_DIR = os.path.join(BASE_DIR, 'www')
 # ~/Library/Application Support/XboxWebRemote/ (Resources 只读)
 DATA_DIR = os.environ.get('XWR_DATA_DIR') or BASE_DIR
 TOKEN_FILE = os.path.join(DATA_DIR, 'tokens.json')
-PORT = 8977
+HOST = os.environ.get('XWR_HOST', '127.0.0.1')
+PORT = int(os.environ.get('XWR_PORT', '8977'))
+ACCESS_USER = os.environ.get('XWR_ACCESS_USER', 'xbox')
+ACCESS_PASSWORD = os.environ.get('XWR_ACCESS_PASSWORD', '')
+PUBLIC_ORIGIN = os.environ.get('XWR_PUBLIC_ORIGIN', '').rstrip('/')
+ENABLE_LIVE = os.environ.get('XWR_ENABLE_LIVE', '0') == '1'
 TMP_DIR = os.path.join(tempfile.gettempdir(), 'xwr-hls')
 FFMPEG_LOG = os.path.join(tempfile.gettempdir(), 'xwr-ffmpeg.log')
 
@@ -136,13 +143,10 @@ def save_tokens():
 def load_tokens():
     if not os.path.exists(TOKEN_FILE):
         return
-    try:
-        with open(TOKEN_FILE) as f:
-            data = json.load(f)
-        _state.update({k: v for k, v in data.items() if k in _state})
-        log('已加载本地令牌 (上次登录保留)')
-    except Exception as e:
-        log('读取 tokens.json 失败: %s', e)
+    with open(TOKEN_FILE) as f:
+        data = json.load(f)
+    _state.update({k: v for k, v in data.items() if k in _state})
+    log('已加载本地令牌 (上次登录保留)')
 
 
 # ---------------------------------------------------------------- XAL 密钥与签名
@@ -345,9 +349,13 @@ def xal_user_access():
             'scope': 'service::user.auth.xboxlive.com::MBI_SSL',
         })
         if status != 200 or 'access_token' not in data:
-            _state['xaluser'] = None
-            save_tokens()
-            raise RuntimeError('刷新登录令牌失败, 请重新登录: %s' % json.dumps(data)[:200])
+            # 网络/上游故障不撤销仍可续签的授权。
+            if isinstance(data, dict) and data.get('error') == 'invalid_grant':
+                _state['xaluser'] = None
+                save_tokens()
+            raise RuntimeError('刷新登录令牌失败%s: %s' % (
+                '，请重新登录' if _state['xaluser'] is None else '（授权已保留，请稍后重试）',
+                json.dumps(data)[:200]))
         _state['xaluser'] = {
             'access_token': data['access_token'],
             'refresh_token': data.get('refresh_token', u['refresh_token']),
@@ -364,11 +372,19 @@ def xal_complete_login(url_or_code):
         raise RuntimeError('没有进行中的登录, 请先重新发起')
     code = url_or_code.strip()
     if 'code=' in code:
+        callback = urllib.parse.urlparse(code)
+        if (callback.scheme, callback.netloc) != (
+                urllib.parse.urlparse(XAL_APP['RedirectUri']).scheme, 'auth'):
+            raise ValueError('登录回调地址不正确')
         q = urllib.parse.urlparse(code).query or code.split('?', 1)[-1]
         params = urllib.parse.parse_qs(q)
         if 'code' not in params:
             raise RuntimeError('粘贴的内容里没有找到 code= 参数')
+        if not hmac.compare_digest(params.get('state', [''])[0].encode(), _xal_flow['state'].encode()):
+            raise ValueError('登录回调 state 不匹配，请使用本次登录的完整回调地址')
         code = params['code'][0]
+    elif ACCESS_PASSWORD:
+        raise ValueError('远程部署请提交完整登录回调地址，包含 code 和 state')
     flow, _xal_flow = _xal_flow, None
     status, data = http_json('POST', 'login.live.com', '/oauth20_token.srf', {}, form={
         'client_id': XAL_APP['AppId'],
@@ -889,6 +905,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
+    def _authorize(self, method):
+        if ACCESS_PASSWORD:
+            expected = 'Basic ' + base64.b64encode(
+                (ACCESS_USER + ':' + ACCESS_PASSWORD).encode()).decode()
+            if not hmac.compare_digest(self.headers.get('Authorization', '').encode(), expected.encode()):
+                self.close_connection = True
+                self.send_response(401)
+                self.send_header('WWW-Authenticate', 'Basic realm="XboxWebRemote", charset="UTF-8"')
+                self.send_header('Content-Length', '0')
+                self.send_header('Cache-Control', 'no-store')
+                self.send_header('Connection', 'close')
+                self.end_headers()
+                return False
+        if method != 'GET':
+            origin = self.headers.get('Origin')
+            expected = PUBLIC_ORIGIN
+            same_origin = (origin == expected if expected else
+                           urllib.parse.urlparse(origin or '').netloc == self.headers.get('Host'))
+            if self.headers.get('Sec-Fetch-Site') == 'cross-site' or (origin and not same_origin):
+                self.close_connection = True
+                self._json({'error': '不允许跨站操作'}, 403)
+                return False
+        return True
+
     def _json(self, obj, status=200):
         body = json.dumps(obj, ensure_ascii=False).encode('utf-8')
         self.send_response(status)
@@ -905,8 +945,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _static(self, path):
         if path == '/':
             path = '/index.html'
-        fname = os.path.normpath(os.path.join(WWW_DIR, path.lstrip('/')))
-        if not fname.startswith(WWW_DIR) or not os.path.isfile(fname):
+        fname = os.path.realpath(os.path.join(WWW_DIR, urllib.parse.unquote(path).lstrip('/')))
+        if os.path.commonpath([os.path.realpath(WWW_DIR), fname]) != os.path.realpath(WWW_DIR) or not os.path.isfile(fname):
             self._json({'error': 'not found'}, 404)
             return
         ctype = mimetypes.guess_type(fname)[0] or 'application/octet-stream'
@@ -920,13 +960,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _route(self, method):
+        if not self._authorize(method):
+            return
         path = urllib.parse.urlparse(self.path).path
+        if not ENABLE_LIVE and (path == '/live.flv' or path.startswith('/api/live/')):
+            return self._json({'error': '直播源未启用'}, 404)
         if path == '/live.flv':
             return live_stream(self)
         if path.startswith('/api/'):
             return self._api(method, path)
         if path.startswith('/v5') or path.startswith('/v6') or path.startswith('/v2'):
-            return self._proxy(method, path)
+            query = urllib.parse.urlparse(self.path).query
+            return self._proxy(method, path + ('?' + query if query else ''))
         if method == 'GET':
             return self._static(path)
         self._json({'error': 'method not allowed'}, 405)
@@ -934,6 +979,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _api(self, method, path):
         global _xal_flow
         try:
+            if path == '/api/config' and method == 'GET':
+                return self._json({'remoteLogin': bool(ACCESS_PASSWORD),
+                                   'liveEnabled': ENABLE_LIVE})
             if path == '/api/auth/status' and method == 'GET':
                 logged = bool(_state.get('xaluser') and _state.get('sisu'))
                 detail = ''
@@ -946,7 +994,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json({'authenticated': logged, 'detail': detail})
 
             if path == '/api/auth/start' and method == 'POST':
-                url = xal_begin_login()
+                with _token_lock:
+                    url = xal_begin_login()
                 return self._json({'url': url})
 
             if path == '/api/auth/code' and method == 'POST':
@@ -954,15 +1003,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 code = (body or {}).get('code') or ''
                 if not code:
                     return self._json({'error': '请粘贴登录后跳转的完整地址'}, 400)
-                xal_complete_login(code)
+                with _token_lock:
+                    xal_complete_login(code)
                 return self._json({'status': 'ok'})
 
             if path == '/api/auth/logout' and method == 'POST':
-                for k in list(_state):
-                    _state[k] = None
-                _xal_flow = None
-                if os.path.exists(TOKEN_FILE):
-                    os.remove(TOKEN_FILE)
+                with _token_lock:
+                    for k in list(_state):
+                        _state[k] = None
+                    _xal_flow = None
+                    if os.path.exists(TOKEN_FILE):
+                        os.remove(TOKEN_FILE)
                 log('已退出登录, 令牌已删除')
                 return self._json({'status': 'ok'})
 
@@ -1035,6 +1086,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json({'ok': True})
 
             return self._json({'error': 'unknown api'}, 404)
+        except ValueError as e:
+            return self._json({'error': str(e)}, 400)
         except Exception as e:
             log('API 错误 %s: %s', path, e)
             return self._json({'error': str(e)}, 500)
@@ -1196,15 +1249,27 @@ def handle_auth_code_arg():
 
 def main():
     handle_auth_code_arg()
+    if not ipaddress.ip_address(HOST).is_loopback and not ACCESS_PASSWORD:
+        raise ValueError('非本机监听必须设置 XWR_ACCESS_PASSWORD，并通过 HTTPS 反向代理访问')
+    if ':' in ACCESS_USER or not ACCESS_USER:
+        raise ValueError('XWR_ACCESS_USER 不能为空或包含冒号')
+    origin = urllib.parse.urlparse(PUBLIC_ORIGIN)
+    if PUBLIC_ORIGIN and (origin.scheme != 'https' or not origin.netloc or
+                          origin.path or origin.query or origin.fragment or origin.username):
+        raise ValueError('XWR_PUBLIC_ORIGIN 必须是 HTTPS origin，例如 https://xbox.example.com')
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
     load_tokens()
     if not os.path.isdir(WWW_DIR):
         log('缺少 www/ 目录, 请保持文件夹完整')
         sys.exit(1)
     if IS_WINDOWS:
         register_windows_protocol()
-    start_hls_server()
-    httpd = http.server.ThreadingHTTPServer(('127.0.0.1', PORT), Handler)
-    log('Xbox 网页串流服务已启动: http://127.0.0.1:%d  (Ctrl+C 退出)', PORT)
+    if ENABLE_LIVE:
+        if not ipaddress.ip_address(HOST).is_loopback:
+            raise ValueError('远程部署不提供无鉴权 HLS 服务，请关闭 XWR_ENABLE_LIVE')
+        start_hls_server()
+    httpd = http.server.ThreadingHTTPServer((HOST, PORT), Handler)
+    log('Xbox 网页串流服务已启动: http://%s:%d  (Ctrl+C 退出)', HOST, PORT)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
