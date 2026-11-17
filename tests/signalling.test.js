@@ -38,7 +38,7 @@ test('real vendor SDP method rejects HTTP 502 without polling absent answer', as
 
 test('HTTP 204 replies are polled until SDP answer arrives', async t => {
   let calls = 0;
-  const {attach} = setup(t, async () => ++calls < 3 ? reply(null, 204) : reply({exchangeResponse:'answer'}));
+  const {attach} = setup(t, async () => ++calls < 3 ? reply(null, 204) : reply({exchangeResponse:'answer'}), {pollTimeout:1000});
   const session = attach({getSessionPath:()=>'/session', stop:async()=>{}});
   assert.deepEqual(await session.waitForSdpResponse(), {exchangeResponse:'answer'});
   assert.equal(calls, 3);
