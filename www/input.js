@@ -33,37 +33,12 @@ const XwrInput = {
     return gamepad;
   },
 
-  install(player, {schedule = setTimeout, cancel = clearTimeout, onError = error => console.error('input', error), target} = {}) {
+  install(player, {schedule = setTimeout, cancel = clearTimeout, onError = error => console.error('input', error)} = {}) {
     const {input, control} = player._channels;
     const state = {started:false, stopped:false, ticks:0, frames:0, error:null};
     input._xwrInput = state;
     const nativeStart = input.start.bind(input), nativeDestroy = input.destroy.bind(input);
     let requested = false, timer;
-    const keyboard = {};
-    const keyboardMap = {ArrowUp:'DPadUp', ArrowDown:'DPadDown', ArrowLeft:'DPadLeft', ArrowRight:'DPadRight',
-      Enter:'A', Backspace:'B', x:'X', y:'Y', '[':'LeftShoulder', ']':'RightShoulder',
-      '-':'LeftTrigger', '=':'RightTrigger', m:'Menu', v:'View', n:'Nexus'};
-    const keyboardFrame = () => {
-      const handlers=Object.values(control.getGamepadHandlers()).filter(handler=>handler && typeof handler.getDefaultFamepadFrame==='function');
-      if(!handlers.length) return null;
-      const frame=handlers[0].getDefaultFamepadFrame();
-      frame.GamepadIndex=handlers[0]._index;
-      for(const name of Object.values(keyboardMap)) frame[name]=keyboard[name] ? 1 : 0;
-      return frame;
-    };
-    const sendKeyboard = event => {
-      const name=keyboardMap[event.key] || keyboardMap[event.key?.toLowerCase()];
-      if(!name || state.stopped || input._dataChannel.readyState !== 'open' || control._dataChannel.readyState !== 'open') return;
-      if(event.type==='keydown' && event.repeat && keyboard[name]) { event.preventDefault(); return; }
-      keyboard[name]=event.type==='keydown';
-      event.preventDefault();
-      const frame=keyboardFrame();
-      if(frame) { input.queueGamepadFrames([frame], true); state.frames++; }
-    };
-    const keyTarget=target || (typeof window!=='undefined' ? window : globalThis);
-    if(!keyTarget || typeof keyTarget.addEventListener !== 'function') throw new TypeError('keyboard target unavailable');
-    keyTarget.addEventListener('keydown',sendKeyboard,true);
-    keyTarget.addEventListener('keyup',sendKeyboard,true);
     const tryStart = () => {
       if (!requested || state.started || state.stopped ||
           !player._channels.message._handshakeCompleted ||
@@ -96,8 +71,6 @@ const XwrInput = {
       cancel(timer);
       input._dataChannel.removeEventListener('open', tryStart);
       control._dataChannel.removeEventListener('open', tryStart);
-      keyTarget.removeEventListener('keydown',sendKeyboard,true);
-      keyTarget.removeEventListener('keyup',sendKeyboard,true);
       nativeDestroy();
     };
     input._dataChannel.addEventListener('open', tryStart);
