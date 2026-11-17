@@ -9,21 +9,21 @@ const frame=(second,overrides={})=>({id:'video',timestamp:second*1000,
 function baseline(tuner){tuner.sample(frame(0));tuner.sample(frame(3));}
 
 test('automatic profiles respect configured ceiling and deduplicate low limits',()=>{
-  assert.deepEqual(new Quality(8000).profiles.map(p=>p.bitrate),[8000,4000,2000]);
+  assert.deepEqual(new Quality(50000).profiles.map(p=>p.bitrate),[50000,20000,8000,4000,2000]);
   assert.deepEqual(new Quality(1500).profiles,[{bitrate:1500,quality:'720p'}]);
-  assert.equal(new Quality(0).profile.bitrate,8000);
+  assert.equal(new Quality(0).profile.bitrate,50000);
   assert.equal(new Quality(3000).profile.quality,'720p');
 });
 test('warmup is excluded and a full observation window is required',()=>{
   const q=new Quality();baseline(q);
   assert.equal(q.sample(frame(12)),null);
   assert.equal(q.sample(frame(13)).type,'ready');
-  assert.equal(q.done,true);assert.equal(q.profile.bitrate,8000);
+  assert.equal(q.done,true);assert.equal(q.profile.bitrate,50000);
 });
 test('packet loss lowers one profile and a fresh session has its own warmup',()=>{
   const q=new Quality();baseline(q);
   const decision=q.sample(frame(13,{packetsLost:40}));
-  assert.equal(decision.type,'adjust');assert.equal(decision.profile.bitrate,4000);
+  assert.equal(decision.type,'adjust');assert.equal(decision.profile.bitrate,20000);
   assert.ok(decision.reasons.includes('网络丢包'));
   assert.equal(q.sample(frame(0,{id:'next'})),null);
   assert.equal(q.sample(frame(3,{id:'next'})),null);
@@ -45,7 +45,7 @@ test('buffering and decoder drops trigger degradation even without RTP loss',()=
 test('completed calibration only warns and never reconnects during gameplay',()=>{
   const q=new Quality();baseline(q);q.sample(frame(13));
   assert.equal(q.sample(frame(23,{packetsLost:500})).type,'warning');
-  assert.equal(q.profile.bitrate,8000);
+  assert.equal(q.profile.bitrate,50000);
 });
 test('background tabs reset observation rather than treating throttling as poor network',()=>{
   const q=new Quality();baseline(q);
@@ -63,7 +63,7 @@ test('changed RTP stream and reset counters require a fresh window',()=>{
 test('static content low bitrate and low FPS are not mistaken for poor throughput',()=>{
   const q=new Quality();baseline(q);
   assert.equal(q.sample(frame(13,{framesDecoded:181,packetsReceived:310})).type,'ready');
-  assert.equal(q.profile.bitrate,8000);
+  assert.equal(q.profile.bitrate,50000);
 });
 test('negative packet loss corrections are harmless',()=>{
   const result=Quality.assess(frame(3,{packetsLost:20}),frame(13,{packetsLost:5}));
@@ -79,4 +79,13 @@ test('received RTP without decoded frames is identified separately from success'
   const q=new Quality(1500);q.sample(frame(0,{framesDecoded:0}));q.sample(frame(3,{framesDecoded:0}));
   const result=q.sample(frame(13,{framesDecoded:0}));
   assert.equal(result.noFrames,true);assert.equal(result.bad,true);
+});
+
+
+test('automatic calibration caps adjustments at two reconnects',()=>{
+  const q=new Quality(50000);baseline(q);
+  assert.equal(q.sample(frame(13,{packetsLost:30})).type,'adjust');
+  baseline(q);assert.equal(q.sample(frame(13,{packetsLost:30})).type,'adjust');
+  baseline(q);const result=q.sample(frame(13,{packetsLost:30}));
+  assert.equal(result.type,'ready');assert.equal(q.done,true);assert.equal(q.adjustments,2);
 });

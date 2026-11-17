@@ -1,13 +1,15 @@
 'use strict';
 
 class XwrQuality {
-  constructor(ceiling = 8000) {
-    const cap = ceiling > 0 ? Math.min(ceiling, 8000) : 8000;
-    this.profiles = [8000, 4000, 2000].map(rate => ({
+  constructor(ceiling = 50000) {
+    const cap = ceiling > 0 ? Math.min(ceiling, 50000) : 50000;
+    this.profiles = [50000, 20000, 8000, 4000, 2000].map(rate => ({
       bitrate: Math.min(rate, cap), quality: Math.min(rate, cap) <= 4000 ? '720p' : '1080p',
     })).filter((p, i, all) => !i || p.bitrate !== all[i - 1].bitrate);
     this.index = 0;
     this.done = false;
+    this.adjustments = 0;
+    this.maxAdjustments = 2;
     this.label = '等待媒体连接';
     this.resetWindow();
   }
@@ -58,8 +60,9 @@ class XwrQuality {
     this.baseline = {...video};
     // No automatic reconnect during gameplay: initial calibration owns all changes.
     if (this.done) return result.bad ? {type:'warning', ...result} : null;
-    if (result.bad && this.index < this.profiles.length - 1) {
+    if (result.bad && this.index < this.profiles.length - 1 && this.adjustments < this.maxAdjustments) {
       this.index = result.severe ? this.profiles.length - 1 : this.index + 1;
+      this.adjustments++;
       this.label = result.reasons.join('、')+'，调整档位…';
       this.resetWindow();
       return {type:'adjust', profile:this.profile, ...result};
