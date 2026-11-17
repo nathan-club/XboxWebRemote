@@ -130,18 +130,18 @@
   <div class="card" id="loginCard">
     <div id="loginIdle">
       <p style="margin:0 0 16px;color:var(--dim);font-size:14px">
-        使用微软账号设备码登录。令牌只保存在本机 <code>tokens.json</code>，用于与你自己的 Xbox 建立串流。</p>
+        首次授权后会保存并自动刷新登录；授权失效时再登录。登录凭据只保存在运行服务的设备上。</p>
       <button class="btn" style="width:100%" id="btnLogin">登录微软账号</button>
     </div>
     <div id="loginWaiting" style="display:none">
-      <div class="steps">
+      <div class="steps" id="loginSteps">
         1. 打开 <b><a id="xalLink" target="_blank" rel="noopener">微软登录页 ↗</a></b>，用绑定主机的账号登录<br>
         2. 登录后浏览器会弹窗询问「打开 "Xbox网页串流" 吗？」——点<b>「打开」</b><br>
         3. 本页会自动完成登录（看到右上角系统通知即成功）
       </div>
       <div style="text-align:center;color:var(--dim);font-size:13px;margin-top:14px"><span class="spinner"></span><span id="loginStatus">等待登录完成…</span></div>
       <div style="color:var(--dim);font-size:12.5px;margin-top:10px;line-height:1.8">
-        没有弹窗？可能是登录助手未注册：双击一次文件夹里的 <b>XboxLoginHelper.app</b> 再重试。<br>
+        Windows 远程访问：先<a href="/login-helper.ps1" download>下载登录助手</a>，按部署说明注册。助手仅把回调地址复制到剪贴板，请粘贴到下面完成授权。<br>
         仍不行可手动兜底：登录后把浏览器地址栏 <code>ms-xal-…</code> 开头的完整地址复制到下面。
       </div>
       <input id="xalCode" type="text" placeholder="手动兜底：粘贴 ms-xal://… 开头的完整地址"
@@ -214,6 +214,7 @@
 <div id="toast"></div>
 
 <script src="lib/xCloudPlayer.min.js"></script>
+<script src="launch.js"></script>
 <script>
 'use strict';
 /* webpack 打包产物挂在 .default 下 */
@@ -230,6 +231,8 @@ const QUALITIES = [
 let quality = localStorage.getItem('xwr_quality') || '1080p';
 if(!QUALITIES.some(q=>q.id===quality)) quality = '1080p';
 const curQuality = ()=>QUALITIES.find(q=>q.id===quality);
+const launcher = new XwrLaunch(window.location.href);
+let appConfig = {remoteLogin:false, liveEnabled:false};
 
 function deviceInfoFor(q){
   return JSON.stringify({
@@ -293,11 +296,28 @@ function isV6(a){ return a.includes(':'); }
 /* =============================== 登录 (XAL/SISU) =============================== */
 
 async function boot(){
-  fetchLanIp();
   try{
-    const r = await fetch('/api/auth/status'); const d = await r.json();
-    if(d.authenticated) enterConsoles(); else showView('view-login');
-  }catch(e){ showView('view-login'); msg($('loginMsg'),'无法连接本地服务，请确认 server.py 正在运行'); }
+    if(!window.isSecureContext) throw new Error('请通过 HTTPS 或 localhost 打开，手柄与媒体功能需要安全连接');
+    const configResponse = await fetch('/api/config');
+    if(!configResponse.ok) throw new Error('服务访问失败：HTTP '+configResponse.status);
+    appConfig = await configResponse.json();
+    if(appConfig.remoteLogin){
+      $('loginSteps').innerHTML = '1. 首次授权前，下载并注册下方 Windows 登录助手。<br>'+
+        '2. 打开 <b><a id="xalLink" target="_blank" rel="noopener">微软登录页 ↗</a></b>，登录绑定主机的账号。<br>'+
+        '3. 允许打开登录助手，然后把剪贴板中的完整回调地址粘贴到下方，点击“完成授权”。';
+      $('btnCode').textContent = '完成授权';
+      $('loginStatus').textContent = '等待登录后粘贴回调地址…';
+    }
+    if(appConfig.liveEnabled) fetchLanIp();
+    else {
+      $('srcPanel').style.display = 'none';
+      $('btnSource').style.display = 'none';
+    }
+    const r = await fetch('/api/auth/status');
+    if(!r.ok) throw new Error('读取授权失败：HTTP '+r.status);
+    const d = await r.json();
+    if(d.authenticated) await enterConsoles(); else showView('view-login');
+  }catch(e){ showView('view-login'); msg($('loginMsg'), e.message); }
 }
 
 $('btnLogin').onclick = async () => {
@@ -383,7 +403,11 @@ async function refreshConsoles(){
     if(r.status===401){ msg($('loginMsg'),'令牌已失效，请重新登录'); showView('view-login'); return; }
     const d = await r.json();
     consolesCache = d.results||[];
+    if(!r.ok) throw new Error(d.error || 'HTTP '+r.status);
     renderConsoles();
+    const target = launcher.take(consolesCache);
+    if(target) await startFlow(target);
+    else if(launcher.missing) toast('直达链接指定的主机不在当前账号下，请选择主机。', 6000);
   }catch(e){
     grid.innerHTML = '<div class="empty">获取主机列表失败：'+e.message+'<br>请确认网络可访问 Xbox 服务后点“刷新”。</div>';
   }
@@ -421,6 +445,16 @@ function renderConsoles(){
         <span style="color:var(--dim);font-size:12px">画质</span>
         ${QUALITIES.map(q=>`<button class="chip qchip ${q.id===quality?'on':''}" data-q="${q.id}">${q.label}</button>`).join('')}
       </div>`;
+    const direct = document.createElement('button');
+    direct.className = 'btn ghost small';
+    direct.textContent = '复制直达链接';
+    direct.onclick = async ()=>{
+      try{
+        await navigator.clipboard.writeText(XwrLaunch.link(window.location.href, c.serverId));
+        toast('已复制，收藏此链接即可直接发起串流');
+      }catch(e){ toast('复制失败：'+e.message, 5000); }
+    };
+    card.appendChild(direct);
     card.querySelector('.streambtn').onclick = ()=>startFlow(c);
     card.querySelector('.powerbtn').onclick = ()=>powerCommand(c, on?'off':'on', card.querySelector('.powerbtn'));
     card.querySelectorAll('.qchip').forEach(ch=>{
@@ -983,8 +1017,8 @@ function classify(local, remote){
   if(!remote) return ['…',''];
   const rt = remote.candidateType||'', lt = local&&local.candidateType||'';
   const ra = remote.address||'';
-  if(rt==='relay'||lt==='relay') return ['中继 RELAY','badc'];
-  if(isPrivateIp(ra)) return ['局域网直连 🎉','ok'];
+  if(rt==='relay'||lt==='relay') return ['TURN 中继','badc'];
+  if(isPrivateIp(ra)) return ['私网地址通道','ok'];
   if(isV6(ra)) return ['IPv6 直连','ok'];
   if(rt==='host') return ['公网直连 (host)','ok'];
   return ['NAT 穿透直连 (P2P)','ok'];
@@ -1045,7 +1079,7 @@ async function pollStats(){
   panel.innerHTML =
     '<div class="verdict '+verdict[1]+'">链路: '+verdict[0]+'</div>'+
     '<table>'+rows.map(r=>'<tr><td>'+r[0]+'</td><td>'+r[1]+'</td></tr>').join('')+'</table>'+
-    '<div style="color:var(--dim);margin-top:6px;border-top:1px solid var(--line);padding-top:6px">若显示“中继 RELAY”说明走了微软转发；<br>局域网内应显示“局域网直连”。</div>';
+    '<div style="color:var(--dim);margin-top:6px;border-top:1px solid var(--line);padding-top:6px">TURN 中继不代表一定由微软提供；私网地址也可能经过隧道。<br>请结合两端地址和服务器流量确认实际路径。</div>';
   if(pair){
     pill.style.display='flex';
     pill.innerHTML = '链路 <b style="color:'+(verdict[1]==='ok'?'var(--accent)':verdict[1]==='badc'?'var(--err)':'var(--warn)')+'">&nbsp;'+verdict[0]+'</b>';

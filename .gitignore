@@ -12,3 +12,9 @@ handler.log
 bin/ffmpeg
 bin/
 build/
+
+# NAS 部署配置与账号数据
+.env
+.env.*
+!.env.example
+/data/

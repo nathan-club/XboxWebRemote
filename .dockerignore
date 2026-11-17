@@ -1,0 +1,10 @@
+.git
+.env
+.env.*
+**/tokens*.json
+**/.tokens-*.tmp
+**/__pycache__
+tests
+bin
+build
+*.log

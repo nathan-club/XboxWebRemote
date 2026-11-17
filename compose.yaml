@@ -1,0 +1,17 @@
+services:
+  xbox-web-remote:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${XWR_BIND_ADDRESS:-127.0.0.1}:8977:8977"
+    environment:
+      XWR_ACCESS_USER: ${XWR_ACCESS_USER:-xbox}
+      XWR_ACCESS_PASSWORD: ${XWR_ACCESS_PASSWORD:?set XWR_ACCESS_PASSWORD in .env}
+      XWR_PUBLIC_ORIGIN: ${XWR_PUBLIC_ORIGIN:-}
+    volumes:
+      - xbox-auth:/data
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+volumes:
+  xbox-auth:

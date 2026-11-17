@@ -6,6 +6,14 @@
 > 本项目由 **ZCode AI 编码代理（基于智谱 Z.ai 的 GLM 大模型）** 应用户需求编写，包括全部服务端、前端与协议实现。
 > This project was developed by the **ZCode AI coding agent (powered by GLM, trained by Z.ai)** at a user's request — all server, frontend and protocol code included.
 
+## 此 fork：NAS 网页入口
+
+新增 Docker Compose 部署、持久授权、远程访问密码、Windows 远程授权剪贴板助手，
+以及 `?console=主机ID` 直达串流链接。授权刷新沿用原有协议实现，临时上游故障不删除授权。
+
+部署与分阶段实机验收见 **[NAS 部署说明](docs/NAS.md)**。
+本轮不包含上海隧道/TURN 部署；公网 HTTPS 本身不会转发 WebRTC 媒体。
+
 ![screenshot](docs/screenshot.png)
 
 ## 功能
