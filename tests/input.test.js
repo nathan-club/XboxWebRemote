@@ -192,3 +192,24 @@ test('keyboard-only input sends immediately when no physical controller is conne
   f.input.start();f.tick();
   assert.equal(state.frames,1);assert.equal(f.packets.length,2);
 });
+
+
+test('reconnect prefers the standard controller when browser exposes multiple pads',()=>{
+  const f=fixture();
+  const virtual={index:1,mapping:'',buttons:Array.from({length:16},()=>({value:0})),axes:[0,0,0,0,0,0]};
+  const standard={index:2,mapping:'standard',buttons:Array.from({length:17},()=>({value:0})),axes:[0,0,0,0]};
+  const pads=()=>[virtual,standard];
+  Input.prepareGamepad(f.gamepad,{pads,focused:()=>true});
+  f.gamepad._physicalGamepadId=1;
+  f.gamepad.attach(f.player);
+  assert.equal(f.gamepad.getGamepadState().GamepadIndex,0);
+  assert.equal(f.gamepad.getPhysicalGamepadId(),2);
+});
+
+test('standard mapping remains selected after a new session replaces the old pad list',()=>{
+  const f=fixture();let current=[{index:0,mapping:'',buttons:Array.from({length:16},()=>({value:0})),axes:[0,0,0,0,0,0]}];
+  Input.prepareGamepad(f.gamepad,{pads:()=>current,focused:()=>true});
+  f.gamepad._physicalGamepadId=0;f.gamepad.attach(f.player);assert.equal(f.gamepad.getPhysicalGamepadId(),0);
+  current=[{index:0,mapping:'',buttons:Array.from({length:16},()=>({value:0})),axes:[0,0,0,0,0,0]}, {index:1,mapping:'standard',buttons:Array.from({length:17},()=>({value:0})),axes:[0,0,0,0]}];
+  assert.ok(f.gamepad.getGamepadState());assert.equal(f.gamepad.getPhysicalGamepadId(),1);
+});

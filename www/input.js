@@ -3,12 +3,16 @@
 const XwrInput = {
   prepareGamepad(gamepad, {pads = () => navigator.getGamepads(), focused = () => document.hasFocus()} = {}) {
     const readState = gamepad.getGamepadState.bind(gamepad);
+    const selectPad = () => {
+      const list=[...(pads()||[])].filter(p=>p && p.connected !== false);
+      return list.find(p=>p.mapping==='standard') || list.find(p=>p.buttons && p.buttons.length>=17) || list[0];
+    };
     gamepad.getGamepad = index => {
       const pad = pads()[index];
       if (!pad || pad.connected === false) return undefined;
       // The vendor mapping includes Guide (button 16), which some browser pads lack.
       return {
-        index:pad.index, vibrationActuator:pad.vibrationActuator,
+        index:pad.index, mapping:pad.mapping, vibrationActuator:pad.vibrationActuator,
         buttons:Array.from({length:Math.max(17, pad.buttons.length)}, (_, i) => ({
           value:Number.isFinite(pad.buttons[i]?.value) ? pad.buttons[i].value : 0,
         })),
@@ -24,8 +28,12 @@ const XwrInput = {
         gamepad._gamepadOverride.buttons={};
         return wasFocused ? {...gamepad.getDefaultFamepadFrame(), GamepadIndex:gamepad._index} : undefined;
       }
-      if (!gamepad.getGamepad(gamepad.getPhysicalGamepadId())) {
-        gamepad._physicalGamepadId = -1;
+      const preferred=selectPad();
+      const current=gamepad.getGamepad(gamepad.getPhysicalGamepadId());
+      if (preferred && (!current || current.mapping !== 'standard') && preferred.index !== current?.index) {
+        gamepad._physicalGamepadId=preferred.index;
+      } else if (!current) {
+        gamepad._physicalGamepadId=-1;
         gamepad.detectActiveGamepad();
       }
       return readState();
