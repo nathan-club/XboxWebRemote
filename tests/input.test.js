@@ -13,6 +13,7 @@ function fixture() {
     setTimeout:(fn)=>{const timer={fn};timers.push(timer);return timer;},
     clearTimeout:timer=>{if(timer) timer.cancelled=true;}, navigator:{getGamepads:()=>[null,null,pad]},
     setInterval:()=>1, clearInterval(){},
+    dispatchEvent(event){for(const handler of listeners.get(event.type)||[]) handler(event);},
     addEventListener:(name,fn)=>{if(!listeners.has(name)) listeners.set(name,new Set()); listeners.get(name).add(fn);},
     removeEventListener:(name,fn)=>listeners.get(name)?.delete(fn)};
   context.window=context;
@@ -104,7 +105,7 @@ test('real vendor loop dies on a controller without Guide button',()=>{
 
 function installInput(f) {
   const errors=[];
-  const state=Input.install(f.player,{schedule:f.context.setTimeout,cancel:f.context.clearTimeout,onError:e=>errors.push(e)});
+  const state=Input.install(f.player,{schedule:f.context.setTimeout,cancel:f.context.clearTimeout,onError:e=>errors.push(e),target:f.context});
   Input.prepareGamepad(f.gamepad,{pads:()=>[null,null,f.pad],focused:()=>true});
   return {state,errors};
 }
@@ -120,7 +121,7 @@ test('16-button pad and keyboard both produce serialized packets without video m
   const key={key:'ArrowUp',preventDefault(){}};
   f.listeners.get('keydown').forEach(handler=>handler(key));
   assert.equal(f.gamepad.getGamepadState().DPadUp,1);
-  f.tick();assert.equal(state.frames,2);assert.equal(f.packets.length,3);
+  f.tick();assert.equal(state.frames,3);assert.equal(f.packets.length,4);
   f.pad.buttons[0].value=1;assert.equal(f.gamepad.getGamepadState().A,1);
   assert.deepEqual(errors,[]);
 });
@@ -190,5 +191,25 @@ test('keyboard-only input sends immediately when no physical controller is conne
   f.listeners.get('keydown').forEach(handler=>handler({key:'Enter',preventDefault(){}}));
   assert.equal(f.gamepad.getGamepadState().A,1);
   f.input.start();f.tick();
-  assert.equal(state.frames,1);assert.equal(f.packets.length,2);
+  assert.equal(state.frames,2);assert.equal(f.packets.length,3);
+});
+
+
+test('explicit keyboard path sends directional and action frames immediately',()=>{
+  const f=fixture();const {state}=installInput(f);
+  f.player._channels.message._handshakeCompleted=true;
+  media.ensureGamepad(f.player,f.gamepad);f.input.start();
+  const up={key:'ArrowUp',type:'keydown',repeat:false,preventDefault(){this.prevented=true;}};
+  f.context.dispatchEvent(up);
+  assert.equal(up.prevented,true);assert.equal(state.frames,1);assert.equal(f.packets.length,2);
+  const frame=f.gamepad.getDefaultFamepadFrame();frame.GamepadIndex=0;frame.DPadUp=1;
+  f.context.dispatchEvent({key:'ArrowUp',type:'keyup',repeat:false,preventDefault(){}});
+  assert.equal(state.frames,2);assert.equal(f.packets.length,3);
+});
+
+test('keyboard listeners are removed when input channel is destroyed',()=>{
+  const f=fixture();const {state}=installInput(f);f.player._channels.message._handshakeCompleted=true;
+  media.ensureGamepad(f.player,f.gamepad);f.input.start();f.input.destroy();
+  const before=f.packets.length;f.context.dispatchEvent({key:'Enter',type:'keydown',repeat:false,preventDefault(){}});
+  assert.equal(f.packets.length,before);assert.equal(state.stopped,true);
 });
