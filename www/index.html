@@ -215,6 +215,7 @@
 
 <script src="lib/xCloudPlayer.min.js"></script>
 <script src="launch.js"></script>
+<script src="signalling.js"></script>
 <script>
 'use strict';
 /* webpack 打包产物挂在 .default 下 */
@@ -561,6 +562,7 @@ function setState(t, cls){
 
 async function startStream(serverId, name, isRetry, wasOff){
   apiClient = new XCP.ApiClient({host: window.location.origin, locale: 'zh-CN'});
+  const prepareSession = XwrSignalling.install(apiClient);
   setState('请求会话… ('+curQuality().label+')','');
   let resp;
   try{
@@ -587,7 +589,7 @@ async function startStream(serverId, name, isRetry, wasOff){
       '<button class="btn ghost small" style="margin-top:10px" onclick="backToConsoles()">返回</button>', true);
     return;
   }
-  stream = resp;
+  stream = prepareSession(resp);
   stage('正在准备会话…', '等待主机分配串流会话（若主机在待机/唤醒中，可能需要 1–2 分钟）');
 
   // 会话长时间不就绪则报错并清理, 避免卡死 (待机唤醒要给足时间)
@@ -600,7 +602,12 @@ async function startStream(serverId, name, isRetry, wasOff){
 
   stream.onProvisioned = () => {
     clearTimeout(provTimer);
-    stage('会话已就绪', '正在协商 WebRTC 连接…');
+    stage('会话已就绪', '正在交换 SDP 连接描述…');
+    provTimer = setTimeout(()=>{
+      stage('媒体连接超时', '信令或媒体通道未能建立，请断开后重新连接。', true);
+      clearInterval(keepaliveTimer);
+      if(stream) stream.stop().catch(e=>console.error('stop', e));
+    }, 90000);
     startPlayer();
     // 继续观察 ReadyToConnect 并发送 lpt 主机握手令牌
     // (缺失它主机会在 ~5 分钟后主动断开; waitForState('Provisioned') 达成后库会停轮询, 需续看)
@@ -631,7 +638,13 @@ async function startStream(serverId, name, isRetry, wasOff){
       }catch(e){ /* 网络抖动忽略 */ }
     }, 30000);
   };
-  stream.onError = () => { /* 状态轮询错误, 连接层会给出提示 */ };
+  stream.onSignallingError = error => {
+    clearTimeout(provTimer);
+    clearInterval(keepaliveTimer);
+    stage('信令连接失败', '', true);
+    $('stageSub').textContent = error.message + '。请断开后重新连接。';
+    if(stream) stream.stop().catch(e=>console.error('stop', e));
+  };
   stream.waitForState('Provisioned');
 }
 
@@ -657,6 +670,7 @@ async function startPlayer(){
   player.onConnectionStateChange(s=>{
     setState(connText(s), s==='connected'?'good':(s==='failed'?'bad':''));
     if(s==='connected'){
+      clearTimeout(provTimer);
       stageDone();
       ensureGamepad();
       startStats();
@@ -677,11 +691,13 @@ async function startPlayer(){
 
   try{
     const offer = await player.createOffer();
+    const candidatesReady = gatherIce(pc);
     const sdpResp = await stream.sendSDPOffer(offer);
     player.setRemoteOffer(JSON.parse(sdpResp.exchangeResponse).sdp);
 
     // 等本地 ICE 候选取齐 (含 IPv6/多网卡), 再统一发给主机
-    const candidates = await gatherIce(pc);
+    stage('SDP 已交换', '正在交换 ICE 网络地址…');
+    const candidates = await candidatesReady;
     const arr = candidates.map(c=>JSON.stringify({
       candidate:c.candidate, sdpMid:c.sdpMid, sdpMLineIndex:c.sdpMLineIndex,
       usernameFragment: c.usernameFragment||'' }));
@@ -689,7 +705,11 @@ async function startPlayer(){
     player.setRemoteIceCandidates(JSON.parse(iceResp.exchangeResponse));
   }catch(e){
     console.error(e);
-    stage('协商出错', String(e.message||e), true);
+    clearTimeout(provTimer);
+    clearInterval(keepaliveTimer);
+    stage('协商出错', '', true);
+    $('stageSub').textContent = String(e.message||e) + '。请断开后重新连接。';
+    if(stream) stream.stop().catch(error=>console.error('stop', error));
   }
 }
 
