@@ -302,7 +302,7 @@ async function boot(){
     const configResponse = await fetch('/api/config');
     if(!configResponse.ok) throw new Error('服务访问失败：HTTP '+configResponse.status);
     appConfig = await configResponse.json();
-  
+    if(appConfig.videoBitrate && appConfig.videoBitrate <= 2000) quality = '720p';
     if(appConfig.remoteLogin){
       $('loginSteps').innerHTML = '1. 首次授权前，下载并注册下方 Windows 登录助手。<br>'+
         '2. 打开 <b><a id="xalLink" target="_blank" rel="noopener">微软登录页 ↗</a></b>，登录绑定主机的账号。<br>'+

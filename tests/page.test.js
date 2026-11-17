@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 
-function page(authenticated) {
+function page(authenticated, config = {}) {
   const nodes = new Map();
   const element = id => {
     if (!nodes.has(id)) nodes.set(id, {
@@ -25,7 +25,7 @@ function page(authenticated) {
     setInterval:()=>1, clearInterval(){},
     fetch:async url => {
       requests.push(url);
-      const body = url === '/api/config' ? {remoteLogin:true, liveEnabled:false}
+      const body = url === '/api/config' ? {remoteLogin:true, liveEnabled:false, ...config}
         : url === '/api/auth/status' ? {authenticated}
         : url === '/v6/servers/home?mr=50' ? {results:[{serverId:'F1'}, {serverId:'F2'}]}
         : null;
@@ -72,4 +72,11 @@ test('plain HTTP stops before starting authorization or media', async () => {
   await vm.runInContext('boot()', p.context);
   assert.deepEqual(p.requests, []);
   assert.match(p.nodes.get('loginMsg').textContent, /HTTPS/);
+});
+
+
+test('low bandwidth configuration selects 720p before starting a session', async () => {
+  const p = page(true, {videoBitrate:1500});
+  await vm.runInContext('boot()', p.context);
+  assert.equal(vm.runInContext('quality', p.context), '720p');
 });
