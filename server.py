@@ -1009,6 +1009,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json({'remoteLogin': bool(ACCESS_PASSWORD),
                                    'liveEnabled': ENABLE_LIVE, 'iceServers': ice_servers,
                                    'forceRelay': FORCE_RELAY, 'videoBitrate': VIDEO_BITRATE})
+            if path == '/api/diagnostics/input' and method == 'POST':
+                body = json.loads(self._read_body() or b'{}')
+                flags = ('started', 'registered', 'focused')
+                counts = ('frames', 'ticks', 'pads', 'buttons', 'axes')
+                allowed = set(flags + counts + ('error',))
+                if not isinstance(body, dict) or set(body) != allowed:
+                    return self._json({'error': '无效输入状态'}, 400)
+                if (any(type(body[key]) is not bool for key in flags) or
+                        any(type(body[key]) is not int or not 0 <= body[key] <= 1000000000 for key in counts) or
+                        body['error'] not in (None, 'Error', 'TypeError', 'RangeError', 'Other')):
+                    return self._json({'error': '无效输入状态'}, 400)
+                log('输入状态 ' + json.dumps(body, ensure_ascii=False, sort_keys=True))
+                return self._json({'status': 'ok'})
+
             if path == '/api/auth/status' and method == 'GET':
                 logged = bool(_state.get('xaluser') and _state.get('sisu'))
                 detail = ''

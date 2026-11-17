@@ -40,6 +40,7 @@ function page(authenticated, config = {}) {
   vm.runInContext(fs.readFileSync(path.join(root, 'launch.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(root, 'media.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(root, 'quality.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(path.join(root, 'input.js'), 'utf8'), context);
   const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
   const js = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m=>m[1]).join('\n');
   vm.runInContext(js, context);

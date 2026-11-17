@@ -117,6 +117,21 @@ class ServerTests(unittest.TestCase):
                 with self.subTest(value=value[:30]), self.assertRaises(ValueError):
                     server.current_turn_url()
 
+    def test_input_diagnostics_only_accept_anonymous_numeric_state(self):
+        state = {'started': True, 'registered': True, 'focused': True,
+                 'frames': 100, 'ticks': 100, 'pads': 1, 'buttons': 16, 'axes': 4, 'error': None}
+        with self.http_server() as port, patch.object(server, 'log') as logged:
+            status, _, _ = self.request(port, '/api/diagnostics/input', 'POST', json.dumps(state))
+            self.assertEqual(status, 200)
+            self.assertEqual(logged.call_count, 1)
+            for invalid in [dict(state, token='private'), dict(state, error='private detail'),
+                            dict(state, frames=-1), dict(state, focused='yes')]:
+                status, _, _ = self.request(port, '/api/diagnostics/input', 'POST', json.dumps(invalid))
+                self.assertEqual(status, 400)
+            self.assertEqual(logged.call_count, 1)
+            status, _, _ = self.request(port, '/api/diagnostics/input', 'POST', json.dumps(state), authorized=False)
+            self.assertEqual(status, 401)
+
     def test_unauthorized_post_does_not_logout(self):
         server._state['xaluser'] = {'refresh_token': 'retained'}
         with self.http_server() as port:

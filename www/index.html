@@ -228,6 +228,7 @@
 <script src="signalling.js"></script>
 <script src="media.js"></script>
 <script src="quality.js"></script>
+<script src="input.js"></script>
 <script>
 'use strict';
 /* webpack 打包产物挂在 .default 下 */
@@ -250,6 +251,7 @@ let mediaMode = 'auto';
 let autoQuality = localStorage.getItem('xwr_auto_quality') !== '0';
 let qualityTuner=null, effectiveBitrate=0, currentConsole=null, flowGeneration=0, retuning=false;
 let qualityWarningShown=false;
+let inputReportKey=null, inputReportAt=0;
 
 function deviceInfoFor(q){
   return JSON.stringify({
@@ -731,6 +733,10 @@ async function startPlayer(){
   const session = stream;
   const activePlayer = new XCP.Player('streamHolder', {video_bitrate:effectiveBitrate || appConfig.videoBitrate || 0});
   player=activePlayer;
+  inputReportKey=null; inputReportAt=0;
+  if(activePlayer._channels.input && activePlayer._channels.control) XwrInput.install(activePlayer, {
+    onError:error=>{ console.error('input',error); toast('输入循环异常，请返回后重连',6000); },
+  });
   activePlayer._peerConnection.setConfiguration(XwrMedia.rtcConfig(mediaMode, appConfig.iceServers));
   const diagnosticPc = activePlayer._peerConnection;
   diagnosticPc.addEventListener('icecandidateerror', event=>{
@@ -835,7 +841,7 @@ function connText(s){
 
 function ensureGamepad(){
   if(!XwrMedia.inputReady(player)) return;
-  if(!window.__gp0) window.__gp0 = new XCP.Gamepad(0, {enable_keyboard:true, enable_vibration:true});
+  if(!window.__gp0) window.__gp0 = XwrInput.prepareGamepad(new XCP.Gamepad(0, {enable_keyboard:true, enable_vibration:true}));
   try{
     gamepadAttached = XwrMedia.ensureGamepad(player, window.__gp0);
   }catch(e){
@@ -850,9 +856,11 @@ function updateGpPill(){
   if(!player){ pill.style.display='none'; return; }
   const pads = [...(navigator.getGamepads()||[])].filter(g=>g);
   const chOpen = XwrMedia.inputReady(player) && gamepadAttached;
+  const inputState=player._channels.input && player._channels.input._xwrInput;
   const pid = (window.__gp0 && window.__gp0.getPhysicalGamepadId) ? window.__gp0.getPhysicalGamepadId() : -1;
   let txt, ok=true;
-  if(!document.hasFocus()){ txt='⚠️ 点击页面激活输入'; ok=false; }
+  if(inputState && inputState.error){ txt='⚠️ 输入循环异常·请重连'; ok=false; }
+  else if(!document.hasFocus()){ txt='⚠️ 点击页面激活输入'; ok=false; }
   else if(pads.length===0){ txt='⚠️ 手柄未识别·按手柄任意键'; ok=false; }
   else if(pid<0){ txt='⚠️ 手柄已识别·再按一次按键'; ok=false; }
   else if(!chOpen){ txt='⚠️ 手柄通道建立中…'; ok=false; }
@@ -1263,6 +1271,25 @@ async function pollStats(){
   const channels=player._channels||{};
   rows.push(['输入握手', channels.message && channels.message._handshakeCompleted ? '完成' : '等待']);
   rows.push(['手柄注册', gamepadAttached ? '已注册' : '等待']);
+  const inputState=channels.input && channels.input._xwrInput;
+  if(inputState) {
+    const pads=[...(navigator.getGamepads()||[])].filter(Boolean);
+    const first=pads.find(p=>window.__gp0 && p.index===window.__gp0.getPhysicalGamepadId());
+    const report={started:inputState.started, registered:gamepadAttached, focused:document.hasFocus(),
+      frames:inputState.frames, ticks:inputState.ticks, pads:pads.length,
+      buttons:first ? first.buttons.length : 0, axes:first ? first.axes.length : 0,
+      error:['Error','TypeError','RangeError'].includes(inputState.error) ? inputState.error : inputState.error ? 'Other' : null};
+    const key=JSON.stringify({...report, frames:0, ticks:0});
+    const now=Date.now();
+    if(key!==inputReportKey || now-inputReportAt>=30000){
+      inputReportKey=key; inputReportAt=now;
+      fetch('/api/diagnostics/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(report)})
+        .catch(error=>console.error('input diagnostics',error));
+    }
+  }
+  if(inputState) rows.push(['输入采样', inputState.error ? '异常 '+inputState.error : inputState.frames+' 帧 / '+inputState.ticks+' 次']);
+  const pad=window.__gp0 && navigator.getGamepads()[window.__gp0.getPhysicalGamepadId()];
+  if(pad) rows.push(['手柄布局', pad.buttons.length+' 按钮 / '+pad.axes.length+' 轴']);
   rows.push(['输入通道', channels.input && channels.input._dataChannel ? channels.input._dataChannel.readyState : '等待']);
   stats.forEach(r=>{if(r.type==='data-channel' && r.label==='input') rows.push(['输入通道已发送', (r.messagesSent||0)+' 条 / '+(r.bytesSent||0)+' B']);});
   if(a) rows.push(['音频', '正常 ('+a.packetsReceived+' pkts)']);
