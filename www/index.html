@@ -167,6 +167,7 @@
       <option value="direct">仅直连</option>
       <option value="relay">强制中继</option>
     </select>
+    <label><input type="checkbox" id="autoQuality" checked> 自动校准画质</label>
     <span id="mediaHint" style="color:var(--dim);font-size:13px"></span>
   </div>
   <div class="console-grid" id="consoleGrid"></div>
@@ -226,6 +227,7 @@
 <script src="launch.js"></script>
 <script src="signalling.js"></script>
 <script src="media.js"></script>
+<script src="quality.js"></script>
 <script>
 'use strict';
 /* webpack 打包产物挂在 .default 下 */
@@ -245,6 +247,9 @@ const curQuality = ()=>QUALITIES.find(q=>q.id===quality);
 const launcher = new XwrLaunch(window.location.href);
 let appConfig = {remoteLogin:false, liveEnabled:false};
 let mediaMode = 'auto';
+let autoQuality = localStorage.getItem('xwr_auto_quality') !== '0';
+let qualityTuner=null, effectiveBitrate=0, currentConsole=null, flowGeneration=0, retuning=false;
+let qualityWarningShown=false;
 
 function deviceInfoFor(q){
   return JSON.stringify({
@@ -315,6 +320,7 @@ async function boot(){
     appConfig = await configResponse.json();
     mediaMode = XwrMedia.mode(window.location.href, localStorage.getItem('xwr_media_mode'), appConfig);
     $('mediaMode').value = mediaMode;
+    $('autoQuality').checked = autoQuality;
     updateMediaHint();
     if(appConfig.videoBitrate && appConfig.videoBitrate <= 2000) quality = '720p';
     if(appConfig.remoteLogin){
@@ -343,6 +349,10 @@ function updateMediaHint(){
     relay:'媒体经过已配置的 TURN 服务。',
   }[mediaMode];
 }
+$('autoQuality').onchange = event => {
+  autoQuality = event.target.checked;
+  localStorage.setItem('xwr_auto_quality', autoQuality ? '1' : '0');
+};
 $('mediaMode').onchange = event => {
   mediaMode = event.target.value;
   localStorage.setItem('xwr_media_mode', mediaMode);
@@ -490,6 +500,9 @@ function renderConsoles(){
     card.querySelector('.powerbtn').onclick = ()=>powerCommand(c, on?'off':'on', card.querySelector('.powerbtn'));
     card.querySelectorAll('.qchip').forEach(ch=>{
       ch.onclick = ()=>{
+        autoQuality = false;
+        $('autoQuality').checked = false;
+        localStorage.setItem('xwr_auto_quality', '0');
         quality = ch.dataset.q;
         localStorage.setItem('xwr_quality', quality);
         card.querySelectorAll('.qchip').forEach(x=>x.classList.toggle('on', x.dataset.q===quality));
@@ -534,6 +547,7 @@ async function powerCommand(c, action, btn){
 function powerText(s){ return {On:'已开机', Off:'已关机', Standby:'待机', ConnectedStandby:'待机'}[s]||s; }
 
 async function startFlow(c){
+  const generation=++flowGeneration;
   try {
     // A page may stay open past the TURN credential lifetime.
     const response = await fetch('/api/config');
@@ -541,6 +555,12 @@ async function startFlow(c){
     appConfig = await response.json();
     XwrMedia.rtcConfig(mediaMode, appConfig.iceServers);
   } catch(error) { toast(error.message, 5000); return; }
+  if(generation !== flowGeneration) return;
+  currentConsole=c;
+  qualityWarningShown=false;
+  qualityTuner=autoQuality ? new XwrQuality(appConfig.videoBitrate || 8000) : null;
+  effectiveBitrate=qualityTuner ? qualityTuner.profile.bitrate : appConfig.videoBitrate || 0;
+  if(qualityTuner) quality=qualityTuner.profile.quality;
   showView('view-stream');
   const off = c.powerState === 'Off';
   if(c.powerState !== 'On'){
@@ -598,6 +618,7 @@ function setState(t, cls){
 }
 
 async function startStream(serverId, name, isRetry, wasOff){
+  const generation=flowGeneration;
   apiClient = new XCP.ApiClient({host: window.location.origin, locale: 'zh-CN'});
   const prepareSession = XwrSignalling.install(apiClient);
   setState('请求会话… ('+curQuality().label+')','');
@@ -606,6 +627,10 @@ async function startStream(serverId, name, isRetry, wasOff){
     resp = await apiClient.startStream('home', serverId);
   }catch(e){
     resp = {errorDetails:{message:String(e && e.message || e)}};
+  }
+  if(generation !== flowGeneration){
+    if(resp && typeof resp.stop==='function') await resp.stop();
+    return;
   }
   // 该库在网关返回 4xx 时也可能正常 resolve; 成功时返回 Stream 对象, id 在 getSessionId()
   const sid = resp && (typeof resp.getSessionId === 'function' ? resp.getSessionId() : resp.sessionId);
@@ -704,9 +729,10 @@ async function startStream(serverId, name, isRetry, wasOff){
 
 async function startPlayer(){
   const session = stream;
-  player = new XCP.Player('streamHolder', {video_bitrate:appConfig.videoBitrate || 0});
-  player._peerConnection.setConfiguration(XwrMedia.rtcConfig(mediaMode, appConfig.iceServers));
-  const diagnosticPc = player._peerConnection;
+  const activePlayer = new XCP.Player('streamHolder', {video_bitrate:effectiveBitrate || appConfig.videoBitrate || 0});
+  player=activePlayer;
+  activePlayer._peerConnection.setConfiguration(XwrMedia.rtcConfig(mediaMode, appConfig.iceServers));
+  const diagnosticPc = activePlayer._peerConnection;
   diagnosticPc.addEventListener('icecandidateerror', event=>{
     // Keep only protocol error codes, never TURN URLs or temporary credentials.
     diagnosticPc.__iceErrors = [...(diagnosticPc.__iceErrors||[]), event.errorCode].slice(-8);
@@ -715,7 +741,7 @@ async function startPlayer(){
 
   // 追加按所选画质的分辨率申报 (库写死 1080p; 后发的会覆盖, 主机以最后一条为准)
   const DIMS = {'720p':[1280,720], '1080p':[1920,1080], '1440p':[2560,1440]};
-  const msgCh = player._channels.message;
+  const msgCh = activePlayer._channels.message;
   const origSendConfig = msgCh.sendConfig.bind(msgCh);
   msgCh.sendConfig = function(){
     origSendConfig();
@@ -729,21 +755,31 @@ async function startPlayer(){
   };
 
   setState('WebRTC 协商中 ('+curQuality().label+')','');
-  player.onConnectionStateChange(s=>{
+  activePlayer.onConnectionStateChange(s=>{
     if(stream !== session) return;
     setState(connText(s), s==='connected'?'good':(s==='failed'?'bad':''));
     if(s==='connected'){
       session.onMediaConnected();
       clearTimeout(provTimer);
-      stageDone();
+      if(qualityTuner && !qualityTuner.done){
+        stage('正在自动校准画质', '预热后观察 10 秒，必要时自动降档；最多调整两次。');
+        provTimer=setTimeout(()=>{
+          if(stream !== session || !qualityTuner || qualityTuner.done) return;
+          qualityTuner.done=true;
+          qualityTuner.label='统计不足，保留当前档位';
+          stageDone();
+          toast('未获得足够统计，使用当前画质，可返回后重新校准',6000);
+        },30000);
+      }
+      else stageDone();
       ensureGamepad();
-      if(player.getAudioElement && player.getAudioElement()){
-        player.getAudioElement().play().catch(()=>{});
+      if(activePlayer.getAudioElement && activePlayer.getAudioElement()){
+        activePlayer.getAudioElement().play().catch(()=>{});
       }
     }
     if(s==='failed'){
       clearTimeout(provTimer); clearInterval(keepaliveTimer);
-      const pc = player._peerConnection;
+      const pc = activePlayer._peerConnection;
       const reason = pc.iceConnectionState==='failed' ? 'ICE 网络连通检查失败（UDP / TURN / 主机候选地址）'
         : 'ICE 之后的媒体安全握手失败';
       pollStats().finally(()=>stopStats());
@@ -753,30 +789,36 @@ async function startPlayer(){
         '<br><button class="btn ghost small" style="margin-top:10px" onclick="backToConsoles()">返回</button>', true);
     }
   });
-  player.setChatSdpHandler(offer=>{
-    stream.sendChatSDPOffer(offer).then(resp=>{
-      player.setRemoteOffer(JSON.parse(resp.exchangeResponse).sdp);
+  activePlayer.setChatSdpHandler(offer=>{
+    session.sendChatSDPOffer(offer).then(resp=>{
+      if(stream !== session) return;
+      activePlayer.setRemoteOffer(JSON.parse(resp.exchangeResponse).sdp);
     }).catch(e=>console.error('chat sdp', e));
   });
 
-  const pc = player._peerConnection;
+  const pc = activePlayer._peerConnection;
 
   try{
-    const offer = await player.createOffer();
-    const candidatesReady = XwrMedia.gather(pc, player.getIceCandidates());
+    const offer = await activePlayer.createOffer();
+    if(stream !== session) return;
+    const candidatesReady = XwrMedia.gather(pc, activePlayer.getIceCandidates());
     candidatesReady.catch(()=>{}); // May reject while the SDP request is still in flight.
-    const sdpResp = await stream.sendSDPOffer(offer);
-    player.setRemoteOffer(JSON.parse(sdpResp.exchangeResponse).sdp);
+    const sdpResp = await session.sendSDPOffer(offer);
+    if(stream !== session) return;
+    activePlayer.setRemoteOffer(JSON.parse(sdpResp.exchangeResponse).sdp);
 
     // 等本地 ICE 候选取齐 (含 IPv6/多网卡), 再统一发给主机
     stage('SDP 已交换', '正在交换 ICE 网络地址…');
     const candidates = await candidatesReady;
+    if(stream !== session) return;
     const arr = candidates.map(c=>JSON.stringify({
       candidate:c.candidate, sdpMid:c.sdpMid, sdpMLineIndex:c.sdpMLineIndex,
       usernameFragment: c.usernameFragment||'' }));
-    const iceResp = await stream.sendIceCandidates(arr);
-    player.setRemoteIceCandidates(JSON.parse(iceResp.exchangeResponse));
+    const iceResp = await session.sendIceCandidates(arr);
+    if(stream !== session) return;
+    activePlayer.setRemoteIceCandidates(JSON.parse(iceResp.exchangeResponse));
   }catch(e){
+    if(stream !== session) return;
     console.error(e);
     clearTimeout(provTimer);
     clearInterval(keepaliveTimer);
@@ -826,16 +868,49 @@ function updateGpPill(){
 }
 window.addEventListener('gamepadconnected', e=>toast('手柄已连接: '+e.gamepad.id));
 
-window.backToConsoles = async ()=>{
+async function disposeSession(){
   clearInterval(keepaliveTimer); clearTimeout(provTimer); stopStats();
+  const oldStream=stream, oldPlayer=player, oldGamepad=window.__gp0;
+  stream=null; player=null; window.__gp0=null; gamepadAttached=false;
+  try {
+    if(oldGamepad) oldGamepad.detach();
+  } finally {
+    try { if(oldPlayer) oldPlayer.destroy(); }
+    finally { if(oldStream) await oldStream.stop(); }
+  }
+}
+
+async function adjustQuality(){
+  if(retuning || !currentConsole || !qualityTuner) return;
+  retuning=true;
+  const generation=flowGeneration, tuner=qualityTuner, target=currentConsole;
+  stage('正在调整画质', tuner.label);
+  try {
+    await disposeSession();
+    if(generation !== flowGeneration) return;
+    const response=await fetch('/api/config');
+    if(!response.ok) throw new Error('读取连接配置失败：HTTP '+response.status);
+    appConfig=await response.json();
+    if(generation !== flowGeneration) return;
+    effectiveBitrate=Math.min(tuner.profile.bitrate, appConfig.videoBitrate || tuner.profile.bitrate);
+    quality=effectiveBitrate<=4000 ? '720p' : tuner.profile.quality;
+    await startStream(target.serverId, target.deviceName, true, false);
+  } catch(error) {
+    if(generation === flowGeneration) {
+      stage('画质调整失败', '', true);
+      $('stageSub').textContent=error.message+'。请返回后重试。';
+    }
+  } finally { retuning=false; }
+}
+
+window.backToConsoles = async ()=>{
+  flowGeneration++;
+  qualityTuner=null; currentConsole=null;
   try{ if(srcPushing) stopSourcePush(); }catch(e){}
   try{ if(liveWin && !liveWin.closed) liveWin.close(); }catch(e){}
   try{ exitLiveStage(); }catch(e){}
   try{ window.xwrAudioTakeover(false); }catch(e){}
-  try{ window.__gp0 && window.__gp0.detach(); }catch(e){}
-  try{ player && player.destroy(); }catch(e){}
-  try{ stream && stream.stop && stream.stop(); }catch(e){}
-  player=null; stream=null; gamepadAttached=false; window.__gp0=null;
+  try{ await disposeSession(); }catch(error){ console.error('stop',error); }
   showView('view-consoles');
   refreshConsoles();
 };
@@ -1107,8 +1182,10 @@ async function pollStats(){
   ensureGamepad();
   updateGpPill();
   if(!player||!player._peerConnection){ return; }
+  const polledPlayer=player;
   let stats;
-  try{ stats = await player._peerConnection.getStats(); }catch(e){ return; }
+  try{ stats = await polledPlayer._peerConnection.getStats(); }catch(e){ return; }
+  if(player !== polledPlayer) return;
   let pair=null;
   const byId={};
   stats.forEach(r=>{ byId[r.id]=r; });
@@ -1143,6 +1220,28 @@ async function pollStats(){
     if(r.kind==='video' && (r.packetsReceived||0)>0) v=r;
     if(r.kind==='audio' && (r.packetsReceived||0)>0) a=r;
   });
+  if(qualityTuner && !retuning && polledPlayer._peerConnection.connectionState==='connected'){
+    const result=qualityTuner.sample(v, !document.hidden);
+    if(result && result.type==='adjust') { adjustQuality(); return; }
+    if(result && result.type==='ready') {
+      clearTimeout(provTimer);
+      if(result.noFrames){
+        stage('未收到可解码画面', '媒体已连接，但最低档仍不能解码画面。请返回后检查连接统计。', true);
+        $('statsPanel').classList.add('show');
+      } else stageDone();
+      if(!result.noFrames) toast('自动校准完成：'+quality+' / '+effectiveBitrate+' kbps'+(result.bad ? '，网络仍有波动' : ''), 5000);
+    }
+    if(result && result.type==='warning' && !qualityWarningShown){
+      qualityWarningShown=true;
+      toast('检测到'+result.reasons.join('、')+'，可返回后重新校准', 6000);
+    }
+    if(!qualityTuner.done && player._peerConnection.connectionState==='connected'){
+      $('stageTitle').textContent='正在自动校准画质';
+      $('stageSub').textContent=qualityTuner.label+' · '+quality+' / '+effectiveBitrate+' kbps';
+    }
+    rows.push(['自动校准', qualityTuner.label]);
+  }
+  rows.push(['视频上限', (effectiveBitrate || appConfig.videoBitrate || '自动')+' kbps']);
   if(v){
     const now=performance.now();
     let kbps='-';
