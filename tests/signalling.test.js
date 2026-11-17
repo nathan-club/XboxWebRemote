@@ -21,7 +21,8 @@ function setup(t, fetcher, options = {}) {
   return {client, attach};
 }
 
-const reply = (body, status = 200) => ({ok:status >= 200 && status < 300, status, json:async()=>body});
+const reply = (body, status = 200) => new Response(
+  status === 204 ? null : JSON.stringify(body), {status});
 
 test('real vendor SDP method rejects HTTP 502 without polling absent answer', async t => {
   const requests = [];
@@ -80,4 +81,38 @@ test('explicit stop aborts in-flight polling and does not restart it', async t =
   await session.stop();
   await assert.rejects(pending, /会话已停止/);
   assert.equal(calls, 1);
+});
+
+
+test('real vendor SDP and ICE accept empty 202 before receiving answers', async t => {
+  const requests = [];
+  const {client, attach} = setup(t, async (url, opts) => {
+    const endpoint = url.split('/').pop();
+    requests.push(opts.method + ' ' + endpoint);
+    if(endpoint === 'play') return reply({sessionId:'synthetic', sessionPath:'v5/sessions/home/synthetic'}, 202);
+    if(opts.method === 'POST' || opts.method === 'DELETE') return new Response(null, {status:202});
+    return reply({exchangeResponse:endpoint + '-answer'});
+  });
+  const session = attach(await client.startStream('home', 'synthetic-console'));
+  assert.deepEqual(await session.sendSDPOffer({sdp:'synthetic'}), {exchangeResponse:'sdp-answer'});
+  assert.deepEqual(await session.sendIceCandidates([]), {exchangeResponse:'ice-answer'});
+  assert.deepEqual(await session.sendMSALAuth('synthetic-token'), {status:202});
+  assert.deepEqual(await session.sendKeepalive(), {status:202});
+  await session.stop();
+  assert.deepEqual(requests, ['POST play','POST sdp','GET sdp','POST ice','GET ice',
+    'POST connect','POST keepalive','DELETE synthetic']);
+});
+
+test('empty GET response reports the endpoint instead of pretending to have SDP', async t => {
+  const {client} = setup(t, async () => new Response(null, {status:200}));
+  await assert.rejects(client.get('/sdp'), /GET sdp 返回空响应/);
+});
+
+test('malformed nonempty JSON remains an error without disclosing the response', async t => {
+  const {client} = setup(t, async () => new Response('private upstream invalid payload', {status:200}));
+  await assert.rejects(client.get('/ice'), error => {
+    assert.match(error.message, /GET ice 返回无效 JSON/);
+    assert.equal(error.message.includes('private upstream'), false);
+    return true;
+  });
 });

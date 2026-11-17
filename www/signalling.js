@@ -21,7 +21,17 @@ const XwrSignalling = {
           throw new Error(`${method} ${path.split('/').pop()} 失败（HTTP ${response.status}）`);
         }
         if (response.status === 204) return {status:204};
-        return await response.json();
+        const text = await response.text();
+        // SDP/ICE submissions and DELETE may acknowledge with an empty 202.
+        if (!text.trim()) {
+          if (method !== 'GET') return {status:response.status};
+          throw new Error(`GET ${path.split('/').pop()} 返回空响应（HTTP ${response.status}）`);
+        }
+        try {
+          return JSON.parse(text);
+        } catch {
+          throw new Error(`${method} ${path.split('/').pop()} 返回无效 JSON（HTTP ${response.status}）`);
+        }
       } catch (error) {
         if (controller.signal.aborted) throw new Error('信令请求超时或会话已停止');
         throw error;
