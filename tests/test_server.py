@@ -23,7 +23,7 @@ class ServerTests(unittest.TestCase):
             TOKEN_FILE=os.path.join(self.temp.name, 'tokens.json'),
             ACCESS_USER='xbox', ACCESS_PASSWORD='test-password',
             PUBLIC_ORIGIN='https://xbox.example.com', ENABLE_LIVE=False,
-            TURN_URL='', TURN_SECRET='', STUN_URLS=[], FORCE_RELAY=False, VIDEO_BITRATE=0,
+            TURN_URL='', TURN_URL_FILE='', TURN_SECRET='', STUN_URLS=[], FORCE_RELAY=False, VIDEO_BITRATE=0,
             _state={key: None for key in server._state}, _xal_flow=None)
         self.patches.start()
         self.addCleanup(self.patches.stop)
@@ -87,6 +87,35 @@ class ServerTests(unittest.TestCase):
         self.assertNotIn(b'synthetic-shared-key', body)
         self.assertTrue(config['forceRelay'])
         self.assertEqual(config['videoBitrate'], 1500)
+
+    def test_turn_address_file_changes_without_restart(self):
+        endpoint = Path(self.temp.name) / 'turn-url'
+        endpoint.write_text('turn:192.0.2.1:3478?transport=udp')
+        with patch.multiple(server, TURN_URL='turn:fallback.example.com:3478',
+                            TURN_URL_FILE=str(endpoint), TURN_SECRET='synthetic-key'):
+            with self.http_server() as port:
+                status, _, body = self.request(port, '/api/config')
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(body)['iceServers'][0]['urls'],
+                                 'turn:192.0.2.1:3478?transport=udp')
+                replacement = endpoint.with_suffix('.new')
+                replacement.write_text('turn:192.0.2.2:3478?transport=udp')
+                replacement.replace(endpoint)
+                status, _, body = self.request(port, '/api/config')
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(body)['iceServers'][0]['urls'],
+                                 'turn:192.0.2.2:3478?transport=udp')
+
+    def test_invalid_turn_address_file_does_not_silently_use_stale_address(self):
+        endpoint = Path(self.temp.name) / 'turn-url'
+        with patch.multiple(server, TURN_URL='turn:fallback.example.com:3478',
+                            TURN_URL_FILE=str(endpoint)):
+            with self.assertRaises(FileNotFoundError):
+                server.current_turn_url()
+            for value in ['', 'https://relay.example.com', 'turn:bad host', 'turn:' + 'a' * 4096]:
+                endpoint.write_text(value)
+                with self.subTest(value=value[:30]), self.assertRaises(ValueError):
+                    server.current_turn_url()
 
     def test_unauthorized_post_does_not_logout(self):
         server._state['xaluser'] = {'refresh_token': 'retained'}

@@ -65,12 +65,25 @@ ACCESS_PASSWORD = os.environ.get('XWR_ACCESS_PASSWORD', '')
 PUBLIC_ORIGIN = os.environ.get('XWR_PUBLIC_ORIGIN', '').rstrip('/')
 ENABLE_LIVE = os.environ.get('XWR_ENABLE_LIVE', '0') == '1'
 TURN_URL = os.environ.get('XWR_TURN_URL', '')
+TURN_URL_FILE = os.environ.get('XWR_TURN_URL_FILE', '')
 TURN_SECRET = os.environ.get('XWR_TURN_SECRET', '')
 STUN_URLS = [url.strip() for url in os.environ.get('XWR_STUN_URLS', '').split(',') if url.strip()]
 FORCE_RELAY = os.environ.get('XWR_FORCE_RELAY', '0') == '1'
 VIDEO_BITRATE = int(os.environ.get('XWR_VIDEO_BITRATE', '0'))
 TMP_DIR = os.path.join(tempfile.gettempdir(), 'xwr-hls')
 FFMPEG_LOG = os.path.join(tempfile.gettempdir(), 'xwr-ffmpeg.log')
+
+def current_turn_url():
+    url = TURN_URL
+    if TURN_URL_FILE:
+        with open(TURN_URL_FILE, encoding='utf-8') as source:
+            url = source.read(4097).strip()
+        if not url or len(url) > 4096:
+            raise ValueError('TURN 地址文件为空或过长')
+    if url and (not url.startswith(('turn:', 'turns:')) or any(c.isspace() for c in url)):
+        raise ValueError('TURN 地址必须使用 turn: 或 turns:，且不能包含空白')
+    return url
+
 
 # XAL 应用标识 (xal-node 同款)
 XAL_APP = {
@@ -987,11 +1000,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             if path == '/api/config' and method == 'GET':
                 ice_servers = [{'urls': STUN_URLS}] if STUN_URLS else []
-                if TURN_URL:
+                turn_url = current_turn_url()
+                if turn_url:
                     username = '%d:%s' % (int(time.time()) + 3600, secrets.token_hex(8))
                     credential = base64.b64encode(hmac.new(
                         TURN_SECRET.encode(), username.encode(), hashlib.sha1).digest()).decode()
-                    ice_servers.append({'urls': TURN_URL, 'username': username, 'credential': credential})
+                    ice_servers.append({'urls': turn_url, 'username': username, 'credential': credential})
                 return self._json({'remoteLogin': bool(ACCESS_PASSWORD),
                                    'liveEnabled': ENABLE_LIVE, 'iceServers': ice_servers,
                                    'forceRelay': FORCE_RELAY, 'videoBitrate': VIDEO_BITRATE})
@@ -1272,11 +1286,10 @@ def main():
         raise ValueError('XWR_PUBLIC_ORIGIN 必须是 HTTPS origin，例如 https://xbox.example.com')
     if any(not url.startswith(('stun:', 'stuns:')) for url in STUN_URLS):
         raise ValueError('XWR_STUN_URLS 必须是逗号分隔的 stun: 或 stuns: 地址')
-    if bool(TURN_URL) != bool(TURN_SECRET):
+    turn_url = current_turn_url()
+    if bool(turn_url) != bool(TURN_SECRET):
         raise ValueError('XWR_TURN_URL 和 XWR_TURN_SECRET 必须同时设置')
-    if TURN_URL and not TURN_URL.startswith(('turn:', 'turns:')):
-        raise ValueError('XWR_TURN_URL 必须使用 turn: 或 turns:')
-    if FORCE_RELAY and not TURN_URL:
+    if FORCE_RELAY and not turn_url:
         raise ValueError('强制中继需要配置 TURN')
     if not 0 <= VIDEO_BITRATE <= 100000:
         raise ValueError('XWR_VIDEO_BITRATE 必须为 0 到 100000 kbps')
