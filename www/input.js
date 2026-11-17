@@ -4,8 +4,13 @@ const XwrInput = {
   prepareGamepad(gamepad, {pads = () => navigator.getGamepads(), focused = () => document.hasFocus()} = {}) {
     const readState = gamepad.getGamepadState.bind(gamepad);
     const selectPad = () => {
-      const list=[...(pads()||[])].filter(p=>p && p.connected !== false);
-      return list.find(p=>p.mapping==='standard') || list.find(p=>p.buttons && p.buttons.length>=17) || list[0];
+      const list=[...(pads()||[])];
+      const slot=list.findIndex(p=>p && p.connected !== false && p.mapping==='standard');
+      if(slot>=0) return {pad:list[slot], slot};
+      const fallback=list.findIndex(p=>p && p.connected !== false && p.buttons && p.buttons.length>=17);
+      if(fallback>=0) return {pad:list[fallback], slot:fallback};
+      const first=list.findIndex(p=>p && p.connected !== false);
+      return first>=0 ? {pad:list[first], slot:first} : null;
     };
     gamepad.getGamepad = index => {
       const pad = pads()[index];
@@ -29,9 +34,11 @@ const XwrInput = {
         return wasFocused ? {...gamepad.getDefaultFamepadFrame(), GamepadIndex:gamepad._index} : undefined;
       }
       const preferred=selectPad();
+      
       const current=gamepad.getGamepad(gamepad.getPhysicalGamepadId());
-      if (preferred && (!current || current.mapping !== 'standard') && preferred.index !== current?.index) {
-        gamepad._physicalGamepadId=preferred.index;
+      if (preferred && preferred.pad.mapping === 'standard' && preferred.slot !== gamepad.getPhysicalGamepadId()) {
+        gamepad._physicalGamepadId=preferred.slot;
+        
       } else if (!current) {
         gamepad._physicalGamepadId=-1;
         gamepad.detectActiveGamepad();

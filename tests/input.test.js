@@ -203,7 +203,8 @@ test('reconnect prefers the standard controller when browser exposes multiple pa
   f.gamepad._physicalGamepadId=1;
   f.gamepad.attach(f.player);
   assert.equal(f.gamepad.getGamepadState().GamepadIndex,0);
-  assert.equal(f.gamepad.getPhysicalGamepadId(),2);
+  assert.equal(f.gamepad.getPhysicalGamepadId(),1);
+  assert.equal(f.gamepad.getGamepad(1).index,2);
 });
 
 test('standard mapping remains selected after a new session replaces the old pad list',()=>{
